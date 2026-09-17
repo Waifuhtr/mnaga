@@ -50,13 +50,34 @@ log "model size : $(du -h "${MODEL_PATH}" | cut -f1)"
 # GPU detection. The image is built on CPU hardware, so GPU presence is decided
 # here at runtime, never at build time.
 # ---------------------------------------------------------------------------
+# Detection is layered on purpose. The base image is plain Ubuntu, not
+# nvidia/cuda, so nvidia-smi is only present if the container runtime injects
+# it. Relying on nvidia-smi alone would silently fall back to CPU on a GPU
+# Space - the user would pay for a T4 and get CPU speed with no warning.
+# PyTorch talks to libcuda directly and is the authoritative check here.
 GPU_LAYERS=0
 GPU_NAME="none"
+GPU_VRAM=""
+GPU_FOUND=0
+
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    GPU_FOUND=1
     GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
     GPU_VRAM="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)"
+elif python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    GPU_FOUND=1
+    GPU_NAME="$(python -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null || echo 'CUDA device')"
+    GPU_VRAM="$(python -c "import torch; print(f'{torch.cuda.get_device_properties(0).total_memory/1024**3:.0f} GiB')" 2>/dev/null || echo '')"
+    log "note       : nvidia-smi unavailable, GPU detected via PyTorch"
+elif [[ -e /dev/nvidiactl ]]; then
+    GPU_FOUND=1
+    GPU_NAME="NVIDIA device (/dev/nvidiactl)"
+    log "note       : GPU device node present but neither nvidia-smi nor torch could query it"
+fi
+
+if (( GPU_FOUND )); then
     GPU_LAYERS=${LLAMA_N_GPU_LAYERS:-99}
-    log "GPU        : ${GPU_NAME} (${GPU_VRAM})"
+    log "GPU        : ${GPU_NAME} ${GPU_VRAM}"
     log "offload    : ENABLED, n_gpu_layers=${GPU_LAYERS}"
     if [[ -n "${NV_LIBS}" ]]; then
         log "cuda libs  : $(echo "${NV_LIBS}" | tr ':' '\n' | wc -l) dir(s) from PyTorch"

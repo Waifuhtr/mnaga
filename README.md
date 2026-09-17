@@ -134,6 +134,13 @@ Aşağıdakiler tahmin değil, gerçek model ve gerçek kaynak kod üzerinde tes
   **içermiyor** (fontTools ile doğrulandı) — bu fontlarla Türkçe çıktı bozuk
   görünürdü. Varsayılan bu yüzden `comic shanns 2.ttf`: hem çizgi roman görünümü
   var hem de Türkçe karakterlerin tamamını içeriyor.
+* **GPU algılaması yalnızca `nvidia-smi`'ye güvenmiyor.** Temel image artık
+  `nvidia/cuda` değil düz `ubuntu` olduğu için `nvidia-smi` yalnızca konteyner
+  çalışma zamanı enjekte ederse bulunur. Tek başına ona güvenmek, T4'te GPU
+  varken sessizce CPU'ya düşmek demekti — kullanıcı T4 parası ödeyip CPU hızı
+  alırdı. Bu yüzden sıralı kontrol var: `nvidia-smi` → `torch.cuda.is_available()`
+  (libcuda ile doğrudan konuşur) → `/dev/nvidiactl`. Hangi yolla bulunduğu
+  loglara yazılır.
 * **Upstream'in `docker_prepare.py --models` filtresi Python 3.11'de sessizce
   hiçbir şey indirmiyor.** Filtre `f"detector.{k}"` yazıyor; `k` bir
   `(str, Enum)` üyesi ve Python 3.11, mixin enum'larda `__format__`
