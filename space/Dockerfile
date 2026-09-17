@@ -36,6 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.10 python3.10-dev python3-pip \
         git curl ca-certificates \
+        libgomp1 \
         libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
         fonts-noto-cjk fonts-dejavu-core \
     && ln -sf /usr/bin/python3.10 /usr/local/bin/python \
@@ -55,7 +56,7 @@ RUN curl -fsSL --retry 5 --retry-delay 3 \
     && tar -xzf /tmp/llama.tar.gz -C /opt/llama --strip-components=1 \
     && rm -f /tmp/llama.tar.gz \
     && chmod +x /opt/llama/llama-server \
-    && /opt/llama/llama-server --version 2>&1 | head -3 || true
+    && /opt/llama/llama-server --version
 
 # ---------------------------------------------------------------------------
 # 3. PyTorch (CUDA 12.8 wheels). Installed before the M.I.T. requirements so
