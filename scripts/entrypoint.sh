@@ -18,7 +18,20 @@ LLAMA_PORT=${LLAMA_PORT:-8081}
 APP_PORT=${APP_PORT:-7860}
 MODEL_ALIAS=${CUSTOM_OPENAI_MODEL:-hy-mt2}
 
-export LD_LIBRARY_PATH="/opt/llama:${LD_LIBRARY_PATH:-}"
+# llama.cpp's CUDA backend needs libcudart.so.12 and libcublas.so.12. This
+# image deliberately keeps exactly ONE copy of the CUDA runtime - the one
+# PyTorch ships in its nvidia-* wheels - instead of also carrying an
+# nvidia/cuda base image, which would add ~5 GB of duplicate libraries and
+# push the image over the size the Space builder can handle. So point the
+# dynamic loader at PyTorch's copy. Globbed rather than hardcoded so a torch
+# upgrade that moves the directories does not silently break GPU offload.
+NV_LIBS="$(python - <<'PY' 2>/dev/null || true
+import glob, os, sysconfig
+sp = sysconfig.get_paths()["purelib"]
+print(":".join(sorted(glob.glob(os.path.join(sp, "nvidia", "*", "lib")))))
+PY
+)"
+export LD_LIBRARY_PATH="/opt/llama${NV_LIBS:+:${NV_LIBS}}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 log() { echo "[entrypoint] $*"; }
 
@@ -45,6 +58,11 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     GPU_LAYERS=${LLAMA_N_GPU_LAYERS:-99}
     log "GPU        : ${GPU_NAME} (${GPU_VRAM})"
     log "offload    : ENABLED, n_gpu_layers=${GPU_LAYERS}"
+    if [[ -n "${NV_LIBS}" ]]; then
+        log "cuda libs  : $(echo "${NV_LIBS}" | tr ':' '\n' | wc -l) dir(s) from PyTorch"
+    else
+        log "cuda libs  : NOT FOUND - GPU offload will fail, check the venv"
+    fi
 else
     GPU_LAYERS=0
     log "GPU        : not visible -> CPU fallback"

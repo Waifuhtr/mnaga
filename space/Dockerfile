@@ -5,24 +5,31 @@
 # This file is the ONLY build file the Space repo needs. Application source is
 # pulled from GitHub at build time, so the Space repo stays tiny.
 #
-# LAYER ORDER IS LOAD-BEARING. Layers are ordered stable -> volatile so that an
+# LAYER ORDER IS LOAD-BEARING. Layers run stable -> volatile so that an
 # application code change never invalidates the 4.6 GB model layer:
 #
-#   1 OS packages            ~ rarely changes
-#   2 llama.cpp CUDA binaries  (pinned release)
-#   3 PyTorch cu128            (pinned version)
-#   4 manga-image-translator + Python deps (pinned commit)
-#   5 M.I.T. detection/OCR/inpainting weights   (build-time download)
-#   6 manga-ocr HF weights                      (build-time download)
-#   7 Hy-MT2-7B-Q4_K_M.gguf  4.6 GB             (build-time download)
-#   8 application source from GitHub            <- only this rebuilds normally
+#   1 OS packages + Python 3.11        ~ rarely changes
+#   2 CUDA libraries (pip)               pinned
+#   3 PyTorch                            pinned
+#   4 llama.cpp CUDA binaries            pinned, smoke-tested here
+#   5 manga-image-translator + deps      pinned commit
+#   6 M.I.T. detection/OCR/inpaint weights
+#   7 manga-ocr weights
+#   8 Hy-MT2-7B-Q4_K_M.gguf  4.6 GB      most expensive layer
+#   9 application source from GitHub   <- only this rebuilds normally
 #
-# Build on CPU hardware (8 vCPU / 32 GB). Everything heavy is resolved here, so
-# switching the Space to T4 Small afterwards starts the container from these
-# same layers with no re-download.
+# SIZE MATTERS: the Space build is OOM-killed while pushing an oversized image,
+# so this deliberately keeps ONE copy of the CUDA runtime. An nvidia/cuda base
+# image would duplicate ~5 GB of libraries that PyTorch's own nvidia-* wheels
+# already provide. Instead the base is plain Ubuntu and llama.cpp is pointed at
+# PyTorch's copy. The CUDA libraries are also installed in their own layer,
+# separately from PyTorch, to halve the largest single layer.
+#
+# Build on CPU hardware (8 vCPU / 32 GB), then switch the Space to T4 Small:
+# nothing is re-downloaded, because every artifact is already in these layers.
 ###############################################################################
 
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -30,18 +37,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # ---------------------------------------------------------------------------
-# 1. OS packages.
+# 1. OS packages + Python 3.11.
 #
-#    The base has to be 24.04: the official llama.cpp CUDA release binaries are
-#    linked against GLIBC 2.38 and 22.04 only provides 2.35. (Their CPU-only
-#    tarball needs just 2.29, which is why this bites the CUDA build alone.)
+#    Ubuntu 24.04 is required because llama.cpp's official CUDA release
+#    binaries are linked against GLIBC 2.38; 22.04 only provides 2.35. (Their
+#    CPU-only tarball needs just 2.29, which is why this bites CUDA alone.)
 #
 #    24.04 ships Python 3.12, but manga-image-translator wants >=3.10,<3.12, so
-#    Python 3.11 comes from deadsnakes and all Python work happens in a venv -
+#    Python 3.11 comes from deadsnakes and all Python work happens in a venv,
 #    which also avoids 24.04's PEP 668 "externally managed environment" refusal.
 #
-#    libglib2.0-0 no longer exists on 24.04; it is libglib2.0-0t64 after the
-#    64-bit time_t transition.
+#    libglib2.0-0 was renamed libglib2.0-0t64 in 24.04 (64-bit time_t).
+#    No CJK system font is installed: manga-image-translator ships its own
+#    fonts, and the renderer uses one of those.
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common gpg-agent \
@@ -51,7 +59,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates \
         libgomp1 \
         libgl1 libglib2.0-0t64 libsm6 libxext6 libxrender1 \
-        fonts-noto-cjk fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Putting the venv first on PATH makes `python` and `pip` resolve to 3.11 for
@@ -59,13 +66,60 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3.11 -m venv /opt/venv \
     && /opt/venv/bin/python --version
 ENV PATH=/opt/venv/bin:$PATH
+ENV VENV_SITE=/opt/venv/lib/python3.11/site-packages
 
 # ---------------------------------------------------------------------------
-# 2. llama.cpp, official prebuilt CUDA 12.8 binaries.
-#    Matches the base image CUDA version exactly, so no extra cudart tarball is
-#    needed. Nothing is compiled here and no GPU is touched at build time.
+# 2. CUDA libraries, as their own layer.
+#
+#    These are exactly the versions PyTorch 2.9.1+cu128 pins. Installing them
+#    up front means the PyTorch layer below only adds torch itself, so the
+#    largest single layer is roughly halved - which is what the image push runs
+#    out of memory on.
+# ---------------------------------------------------------------------------
+RUN python -m pip install --upgrade "pip<25" setuptools wheel \
+    && python -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        nvidia-cublas-cu12==12.8.4.1 \
+        nvidia-cuda-cupti-cu12==12.8.90 \
+        nvidia-cuda-nvrtc-cu12==12.8.93 \
+        nvidia-cuda-runtime-cu12==12.8.90 \
+        nvidia-cudnn-cu12==9.10.2.21 \
+        nvidia-cufft-cu12==11.3.3.83 \
+        nvidia-cufile-cu12==1.13.1.3 \
+        nvidia-curand-cu12==10.3.9.90 \
+        nvidia-cusolver-cu12==11.7.3.90 \
+        nvidia-cusparse-cu12==12.5.8.93 \
+        nvidia-cusparselt-cu12==0.7.1 \
+        nvidia-nccl-cu12==2.27.5 \
+        nvidia-nvjitlink-cu12==12.8.93 \
+        nvidia-nvshmem-cu12==3.3.20 \
+        nvidia-nvtx-cu12==12.8.90 \
+    && test -f "${VENV_SITE}/nvidia/cuda_runtime/lib/libcudart.so.12" \
+    && test -f "${VENV_SITE}/nvidia/cublas/lib/libcublas.so.12"
+
+# ---------------------------------------------------------------------------
+# 3. PyTorch. Its CUDA dependencies are already satisfied by layer 2.
+# ---------------------------------------------------------------------------
+ARG TORCH_VERSION=2.9.1
+ARG TORCHVISION_VERSION=0.24.1
+RUN python -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+    && python -c "import torch; print('torch', torch.__version__, 'cuda build', torch.version.cuda)"
+
+# ---------------------------------------------------------------------------
+# 4. llama.cpp, official prebuilt CUDA 12.8 binaries.
+#
+#    Placed after PyTorch so the smoke test below can run with the real CUDA
+#    libraries visible. `llama-server --version` is a HARD gate on purpose: an
+#    earlier version of this file let it fail silently, which turned a missing
+#    libgomp.so.1 into a runtime crash instead of a build error.
+#    Nothing is compiled and no GPU is touched at build time.
 # ---------------------------------------------------------------------------
 ARG LLAMA_CPP_RELEASE=b11022
+ENV LLAMA_LD_PATH=/opt/llama:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib
 RUN curl -fsSL --retry 5 --retry-delay 3 \
         -o /tmp/llama.tar.gz \
         "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-cuda-12.8-x64.tar.gz" \
@@ -73,52 +127,42 @@ RUN curl -fsSL --retry 5 --retry-delay 3 \
     && tar -xzf /tmp/llama.tar.gz -C /opt/llama --strip-components=1 \
     && rm -f /tmp/llama.tar.gz \
     && chmod +x /opt/llama/llama-server \
-    && /opt/llama/llama-server --version
+    && LD_LIBRARY_PATH="${LLAMA_LD_PATH}" /opt/llama/llama-server --version
 
 # ---------------------------------------------------------------------------
-# 3. PyTorch (CUDA 12.8 wheels). Installed before the M.I.T. requirements so
-#    that requirements.txt's unpinned `torch`/`torchvision` resolve as already
-#    satisfied instead of pulling a second, mismatched build.
-# ---------------------------------------------------------------------------
-ARG TORCH_VERSION=2.9.1
-ARG TORCHVISION_VERSION=0.24.1
-RUN python -m pip install --no-cache-dir --upgrade "pip<25" setuptools wheel \
-    && python -m pip install --no-cache-dir \
-        --index-url https://download.pytorch.org/whl/cu128 \
-        "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
-
-# ---------------------------------------------------------------------------
-# 4. manga-image-translator at a pinned commit + its Python dependencies.
+# 5. manga-image-translator at a pinned commit + its Python dependencies.
 #    Repo:   https://github.com/zyddnys/manga-image-translator
 #    Commit: 95227a2b ("Merge pull request #1157 ... m2m100-hf", 2026-07-20)
-#    g++/cython are needed only to build pydensecrf, then removed again.
+#    g++ is needed only to build pydensecrf, then removed again. The checkout's
+#    .git directory is dropped: it is dead weight in the final image.
 # ---------------------------------------------------------------------------
 ARG MIT_REPO=https://github.com/zyddnys/manga-image-translator
 ARG MIT_COMMIT=95227a2bb0fd306cd4f0c104d57284026f991b3a
 ENV MIT_ROOT=/opt/manga-image-translator
 RUN git clone --filter=blob:none "${MIT_REPO}" "${MIT_ROOT}" \
     && git -C "${MIT_ROOT}" checkout --detach "${MIT_COMMIT}" \
-    && echo "manga-image-translator pinned at ${MIT_COMMIT}"
+    && echo "manga-image-translator pinned at ${MIT_COMMIT}" \
+    && rm -rf "${MIT_ROOT}/.git"
 
 RUN apt-get update && apt-get install -y --no-install-recommends g++ build-essential \
-    && python -m pip install --no-cache-dir cython \
-    && python -m pip install --no-cache-dir -r "${MIT_ROOT}/requirements.txt" \
+    && python -m pip install cython \
+    && python -m pip install -r "${MIT_ROOT}/requirements.txt" \
     && apt-get purge -y --auto-remove g++ build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /root/.cache
 
 # ---------------------------------------------------------------------------
-# 5. M.I.T. detection / OCR / inpainting weights, baked into the image.
-#    docker_prepare.py --models takes "<stage>.<enum value>" keys.
-#    Verified against upstream enums: Detector.default="default",
-#    Ocr.ocr48px="48px", Inpainter.lama_large="lama_large".
+# 6. M.I.T. detection / OCR / inpainting weights, baked into the image.
+#    docker_prepare.py --models takes "<stage>.<enum value>" keys. Verified
+#    against upstream enums: Detector.default="default", Ocr.ocr48px="48px",
+#    Inpainter.lama_large="lama_large".
 # ---------------------------------------------------------------------------
 ARG MIT_MODELS="detector.default,ocr.48px,inpaint.lama_large"
 RUN cd "${MIT_ROOT}" \
     && python -u docker_prepare.py --models "${MIT_MODELS}" \
-    && du -sh "${MIT_ROOT}/models" || true
+    && du -sh "${MIT_ROOT}/models"
 
 # ---------------------------------------------------------------------------
-# 6. manga-ocr weights. Upstream pulls these lazily inside _load(), i.e. at
+# 7. manga-ocr weights. Upstream pulls these lazily inside _load(), i.e. at
 #    RUNTIME, which we do not want. Warm the cache here so selecting the "mocr"
 #    OCR in the UI never triggers a download on a running Space.
 # ---------------------------------------------------------------------------
@@ -129,11 +173,11 @@ p = snapshot_download('kha-white/manga-ocr-base'); \
 print('manga-ocr cached at', p)"
 
 # ---------------------------------------------------------------------------
-# 7. Hy-MT2-7B Q4_K_M (4.62 GB) — the single most expensive layer.
+# 8. Hy-MT2-7B Q4_K_M (4.62 GB) - the single most expensive layer.
 #    Pinned to a repo revision and verified by SHA-256 so the build is
 #    deterministic. Downloaded straight to its final path with curl: using
-#    hf_hub_download would ALSO keep a copy in the HF cache and double the
-#    image size for no benefit.
+#    hf_hub_download would ALSO keep a copy in the HF cache and add another
+#    4.6 GB to an image that is already close to the push limit.
 # ---------------------------------------------------------------------------
 ARG HY_MT2_REPO=tencent/Hy-MT2-7B-GGUF
 ARG HY_MT2_FILE=Hy-MT2-7B-Q4_K_M.gguf
@@ -148,9 +192,9 @@ RUN mkdir -p /opt/models/hy-mt2 \
     && ls -la /opt/models/hy-mt2/
 
 # ---------------------------------------------------------------------------
-# 8. Application source from GitHub. Last layer on purpose: a code change only
-#    rebuilds from here, leaving layers 1-7 (including the 4.6 GB model) cached.
-#    The ADD of the commit ref busts the cache when the branch moves.
+# 9. Application source from GitHub. Last layer on purpose: a code change only
+#    rebuilds from here, leaving the model layers cached. The ADD of the commit
+#    ref busts the cache when the branch moves.
 # ---------------------------------------------------------------------------
 ARG APP_REPO=https://github.com/Waifuhtr/mnaga
 ARG APP_REF=claude/hg-space-repo-access-033wjr
@@ -162,8 +206,8 @@ RUN git clone --depth 1 --branch "${APP_REF}" "${APP_REPO}" /app \
 # ---------------------------------------------------------------------------
 # Runtime configuration
 # ---------------------------------------------------------------------------
-# Point manga-image-translator's custom_openai translator at the local
-# Hy-MT2 llama-server. These are the exact env names read by
+# Point manga-image-translator's custom_openai translator at the local Hy-MT2
+# llama-server. These are the exact env names read by
 # manga_translator/translators/keys.py.
 ENV CUSTOM_OPENAI_API_BASE=http://127.0.0.1:8081/v1 \
     CUSTOM_OPENAI_API_KEY=hy-mt2-local \
@@ -176,12 +220,14 @@ ENV CUSTOM_OPENAI_API_BASE=http://127.0.0.1:8081/v1 \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
-# Writable dirs for the Space's runtime user.
-RUN mkdir -p /data/work /data/results "${MIT_ROOT}/result" \
-    && chmod -R 777 /data "${MIT_ROOT}/result"
+# Spaces runs the container as UID 1000, and /data only exists at runtime when
+# a storage bucket is attached, so scratch space lives in /tmp instead.
+ENV WORK_DIR=/tmp/mnaga-work
+RUN mkdir -p /tmp/mnaga-work "${MIT_ROOT}/result" \
+    && chmod 777 /tmp/mnaga-work "${MIT_ROOT}/result"
 
 EXPOSE 7860
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=240s --retries=5 \
     CMD curl -fsS "http://127.0.0.1:${APP_PORT}/health" || exit 1
 
 WORKDIR /app

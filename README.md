@@ -64,14 +64,15 @@ internet kapalıyken de açılır.**
 Dockerfile katmanları *kararlıdan değişkene* doğru sıralanmıştır:
 
 ```
-1 sistem paketleri        ── neredeyse hiç değişmez
-2 llama.cpp ikilileri     ── sürüm sabitlenmiş (b11022)
-3 PyTorch cu128           ── sürüm sabitlenmiş (2.9.1 / 0.24.1)
-4 M.I.T. + pip bağımlılıkları ── commit sabitlenmiş (95227a2b)
-5 M.I.T. modelleri        ── build sırasında indirilir
-6 manga-ocr ağırlıkları   ── build sırasında indirilir
-7 Hy-MT2 GGUF  4.62 GB    ── EN PAHALI KATMAN
-8 uygulama kaynağı        ── ⟵ normalde yalnızca burası yeniden kurulur
+1 sistem paketleri + Python 3.11 ── neredeyse hiç değişmez
+2 CUDA kütüphaneleri (pip)       ── sürüm sabitlenmiş
+3 PyTorch                        ── sürüm sabitlenmiş (2.9.1 / 0.24.1)
+4 llama.cpp CUDA ikilileri       ── sürüm sabitlenmiş (b11022), burada test edilir
+5 M.I.T. + pip bağımlılıkları    ── commit sabitlenmiş (95227a2b)
+6 M.I.T. modelleri               ── build sırasında indirilir
+7 manga-ocr ağırlıkları          ── build sırasında indirilir
+8 Hy-MT2 GGUF  4.62 GB           ── EN PAHALI KATMAN
+9 uygulama kaynağı               ── ⟵ normalde yalnızca burası yeniden kurulur
 ```
 
 Uygulama kodu **en son** katmandadır; bu yüzden küçük bir kod değişikliği 4.62 GB'ı
@@ -92,6 +93,9 @@ gereksiz yere iki katına çıkardı.
 | `app/static/` | Arayüz (HTML + CSS + JS). Framework yok. |
 | `config/gpt_config.yaml` | Hy-MT2 için prompt ve örnekleme ayarları. M.I.T. bunu `gpt_config` olarak yükler. |
 | `.env.example` | Bütün ortam değişkenleri ve varsayılanları. |
+
+Geçici dosyalar `/tmp/mnaga-work` altında tutulur: HF Spaces'ta `/data` yalnızca
+çalışma anında (storage bucket bağlıysa) vardır ve konteyner UID 1000 ile çalışır.
 
 ---
 
@@ -130,6 +134,15 @@ Aşağıdakiler tahmin değil, gerçek model ve gerçek kaynak kod üzerinde tes
   **içermiyor** (fontTools ile doğrulandı) — bu fontlarla Türkçe çıktı bozuk
   görünürdü. Varsayılan bu yüzden `comic shanns 2.ttf`: hem çizgi roman görünümü
   var hem de Türkçe karakterlerin tamamını içeriyor.
+* **Image boyutu, build'i düşürebiliyor.** İlk sürüm bütün adımları başarıyla
+  tamamladıktan sonra `Pushing image` aşamasında `exit code 137 / OOMKilled`
+  ile düştü: image çok büyüktü. Asıl sebep CUDA çalışma zamanının **iki kez**
+  bulunmasıydı — bir kez `nvidia/cuda` temel image'ından, bir kez de PyTorch'un
+  kendi `nvidia-*` paketlerinden (~5 GB fazlalık). Artık temel image düz
+  `ubuntu:24.04` ve llama.cpp, `LD_LIBRARY_PATH` ile PyTorch'un CUDA
+  kütüphanelerine yönlendiriliyor; tek kopya kalıyor. Ayrıca CUDA
+  kütüphaneleri PyTorch'tan ayrı bir katmana alındı, böylece en büyük tek
+  katman yarıya indi.
 * **Temel image ve Python sürümü.** llama.cpp'nin resmi CUDA release ikilileri
   **GLIBC 2.38**'e bağlı; Ubuntu 22.04 yalnızca 2.35 veriyor ve `llama-server`
   açılmıyordu (yalnızca CPU tarball'ı 2.29 ile yetiniyor, bu yüzden sorun
