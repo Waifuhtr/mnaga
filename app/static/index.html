@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manga Çeviri — Hy-MT2</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Manga Çeviri</h1>
+  <p class="sub">Japonca / İngilizce manga sayfalarını Türkçeye çevirir · <span class="tag">Hy-MT2-7B</span></p>
+  <div id="health" class="health checking">Sistem kontrol ediliyor…</div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1 · Görselleri seç</h2>
+
+    <div id="drop" class="drop">
+      <p><strong>Sürükle bırak</strong> ya da aşağıdan seç</p>
+      <p class="hint">Tek görsel · çoklu görsel · ZIP arşivi</p>
+      <div class="buttons">
+        <label class="btn">
+          Galeriden seç
+          <input type="file" id="pick-images" accept="image/*" multiple hidden>
+        </label>
+        <label class="btn secondary">
+          ZIP yükle
+          <input type="file" id="pick-zip" accept=".zip,application/zip" multiple hidden>
+        </label>
+      </div>
+    </div>
+
+    <div id="file-list" class="file-list" hidden></div>
+  </section>
+
+  <section class="card">
+    <h2>2 · Ayarlar</h2>
+    <div class="grid">
+      <label>Hedef dil
+        <select id="target_lang">
+          <option value="TRK" selected>Türkçe</option>
+          <option value="ENG">İngilizce</option>
+          <option value="CHS">Basitleştirilmiş Çince</option>
+          <option value="KOR">Korece</option>
+        </select>
+      </label>
+      <label>OCR modeli
+        <select id="ocr">
+          <option value="48px" selected>48px (hızlı, varsayılan)</option>
+          <option value="mocr">manga-ocr (Japonca için daha iyi)</option>
+        </select>
+      </label>
+      <label>Metin silme
+        <select id="inpainter">
+          <option value="lama_large" selected>lama_large (önerilen)</option>
+          <option value="none">Kapalı</option>
+        </select>
+      </label>
+      <label>Algılama boyutu
+        <select id="detection_size">
+          <option value="1536">1536 (hızlı)</option>
+          <option value="2048" selected>2048 (dengeli)</option>
+          <option value="2560">2560 (hassas)</option>
+        </select>
+      </label>
+      <label>Yazı boyutu
+        <select id="font_size_offset">
+          <option value="-2">Küçük</option>
+          <option value="0" selected>Normal</option>
+          <option value="2">Büyük</option>
+        </select>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="debug"> Hata ayıklama modu
+      </label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3 · Çevir</h2>
+    <button id="start" class="btn primary big" disabled>Çeviriyi başlat</button>
+    <button id="reset" class="btn secondary" hidden>Yeni çeviri</button>
+
+    <div id="progress-wrap" hidden>
+      <div class="bar"><div id="bar-fill"></div></div>
+      <p id="progress-text" class="progress-text"></p>
+      <p id="stage-text" class="stage-text"></p>
+    </div>
+
+    <div id="error" class="error" hidden></div>
+  </section>
+
+  <section id="results-card" class="card" hidden>
+    <div class="results-head">
+      <h2>Sonuçlar</h2>
+      <button id="download" class="btn primary">ZIP olarak indir</button>
+    </div>
+    <div id="results" class="results"></div>
+  </section>
+
+  <section id="debug-card" class="card" hidden>
+    <h2>Hata ayıklama</h2>
+    <button id="debug-refresh" class="btn secondary">llama-server günlüğünü getir</button>
+    <pre id="debug-out"></pre>
+  </section>
+</main>
+
+<footer>
+  <p>manga-image-translator + Hy-MT2-7B-Q4_K_M · tüm modeller image içine gömülüdür</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

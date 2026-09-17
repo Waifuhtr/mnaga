@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# Prompt + sampling overrides for Hy-MT2-7B.
+#
+# manga-image-translator loads this file with OmegaConf and the custom_openai
+# translator reads it under the "ollama" key (see ConfigGPT.__init__, which sets
+# config_key='ollama' for CustomOpenAiTranslator). The key name is upstream's,
+# not a typo - it is simply the namespace every OpenAI-compatible local backend
+# uses there.
+#
+# Why these values:
+#   * temperature / top_p are the figures Tencent publish for the 7B model
+#     (the upstream defaults, 0.5 / 1.0, are not tuned for this model).
+#   * chat_system_template replaces upstream's ~1600 character three-step
+#     "reasoning" prompt. Both were tested against the real model on the real
+#     GGUF; output was equivalent, but this one is ~1350 characters shorter,
+#     which removes roughly 400 prompt tokens from EVERY request. Over a full
+#     chapter that is the difference between a snappy run and a slow one.
+#   * Hy-MT2 is a translation-only model, so it is not asked to reason,
+#     explain, or offer alternatives.
+# ---------------------------------------------------------------------------
+ollama:
+  # Tencent's published inference settings for Hy-MT2-7B.
+  temperature: 0.7
+  top_p: 0.6
+
+  chat_system_template: >-
+    You are a professional manga translator. Translate every numbered segment
+    into {to_lang}.
+
+    Rules:
+
+    - Output ONLY the translation of each segment, prefixed exactly as <|number|>.
+
+    - Keep the same number of segments, in the same order. Never merge or drop one.
+
+    - Keep sound effects, character names, numbers, placeholders and symbols intact.
+
+    - Preserve the speaker's tone: rudeness, slang, shouting, hesitation and honorifics.
+
+    - Use natural, fluent, spoken {to_lang} that fits manga dialogue.
+
+    - If a segment is already in {to_lang} or is unintelligible, repeat it unchanged.
+
+    - No explanations, no notes, no alternative translations, no commentary.
+
+  # Few-shot pair. Upstream only ships samples for Chinese/English/Korean, so
+  # Turkish would otherwise run zero-shot. Keys must be the full language name
+  # that upstream resolves 'TRK' to (translators/common.py: 'TRK': 'Turkish').
+  chat_sample:
+    Turkish:
+      - "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
+      - "<|1|>Utandım… Dikkat çekmek istemiyorum… Kaybolmak istiyorum…\n<|2|>Sen… iyi misin⁉\n<|3|>Bu herif ne böyle, ortamı hiç mi okuyamıyor…?"
