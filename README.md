@@ -28,9 +28,20 @@ yoksa uygulama CPU'ya düşer ve çalışmaya devam eder.
 4. Build bittikten sonra donanımı **T4 Small**'a çevirin.
 5. `/health` adresinden durumu doğrulayın.
 
-Kod değiştirdiğinizde: GitHub'a push edin, sonra Space'i yeniden build edin.
-Dockerfile'daki `ADD https://api.github.com/.../commits/<branch>` satırı yalnızca
-**son katmanın** cache'ini kırar; 4.62 GB'lık model katmanı yerinde kalır.
+### Kod güncelleme
+
+Uygulama kaynağı image'ın **son katmanına** gömülür. Bu yüzden:
+
+1. GitHub'a push edin.
+2. Space'i **yeniden build edin** — *Settings → Factory rebuild*, ya da Space
+   deposuna herhangi bir commit atın.
+
+> **Önemli:** Space'i yalnızca **restart** etmek yetmez. Restart, mevcut image'ı
+> yeniden başlatır ve içindeki eski kodu çalıştırır; yeni GitHub kodunu almaz.
+> Bu doğrulandı: restart sonrası build günlüğünde yeni bir build görünmüyor.
+
+Dockerfile'daki `ADD https://api.github.com/.../commits/<branch>` satırı, build
+sırasında yalnızca **son katmanın** cache'ini kırmak içindir.
 
 ---
 
