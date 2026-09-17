@@ -134,6 +134,16 @@ Aşağıdakiler tahmin değil, gerçek model ve gerçek kaynak kod üzerinde tes
   **içermiyor** (fontTools ile doğrulandı) — bu fontlarla Türkçe çıktı bozuk
   görünürdü. Varsayılan bu yüzden `comic shanns 2.ttf`: hem çizgi roman görünümü
   var hem de Türkçe karakterlerin tamamını içeriyor.
+* **Upstream'in `docker_prepare.py --models` filtresi Python 3.11'de sessizce
+  hiçbir şey indirmiyor.** Filtre `f"detector.{k}"` yazıyor; `k` bir
+  `(str, Enum)` üyesi ve Python 3.11, mixin enum'larda `__format__`
+  davranışını değiştirip sınıf adını da ekliyor. Sonuç
+  `"detector.Detector.default"` oluyor, hiçbir anahtar eşleşmiyor ve adım
+  **başarılı görünerek** boş geçiyor. (Yalnızca `Translator` sınıfı `__str__`
+  tanımlıyor; bu yüzden çalışma anındaki translator yolu etkilenmiyor.)
+  Bu yüzden modeller enum üyesiyle doğrudan seçiliyor ve indirme sonrası
+  ağırlıkların gerçekten diske indiği **kontrol ediliyor** — aksi halde image,
+  ilk kullanımda model indirmeye çalışırdı.
 * **Image boyutu, build'i düşürebiliyor.** İlk sürüm bütün adımları başarıyla
   tamamladıktan sonra `Pushing image` aşamasında `exit code 137 / OOMKilled`
   ile düştü: image çok büyüktü. Asıl sebep CUDA çalışma zamanının **iki kez**

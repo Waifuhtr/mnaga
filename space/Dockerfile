@@ -144,6 +144,9 @@ RUN git clone --filter=blob:none "${MIT_REPO}" "${MIT_ROOT}" \
     && echo "manga-image-translator pinned at ${MIT_COMMIT}" \
     && rm -rf "${MIT_ROOT}/.git"
 
+# Needed by the prefetch step below as well as at runtime.
+ENV PYTHONPATH=/opt/manga-image-translator:/app
+
 RUN apt-get update && apt-get install -y --no-install-recommends g++ build-essential \
     && python -m pip install cython \
     && python -m pip install -r "${MIT_ROOT}/requirements.txt" \
@@ -152,14 +155,60 @@ RUN apt-get update && apt-get install -y --no-install-recommends g++ build-essen
 
 # ---------------------------------------------------------------------------
 # 6. M.I.T. detection / OCR / inpainting weights, baked into the image.
-#    docker_prepare.py --models takes "<stage>.<enum value>" keys. Verified
-#    against upstream enums: Detector.default="default", Ocr.ocr48px="48px",
-#    Inpainter.lama_large="lama_large".
+#
+#    NOT using upstream's docker_prepare.py --models. That filters with
+#    f"detector.{k}" where k is a str-Enum member, and Python 3.11 changed
+#    Enum.__format__ for mixin enums to include the class name. So the
+#    expression evaluates to "detector.Detector.default", the filter matches
+#    nothing, and the step exits having downloaded NOTHING while still looking
+#    like it worked. (Only Translator defines __str__ upstream, which is why
+#    the runtime translator path is unaffected.)
+#
+#    Selecting by enum member instead is immune to that. The script then
+#    asserts that weights actually landed on disk, so the build fails here
+#    rather than shipping an image that downloads models on first use.
 # ---------------------------------------------------------------------------
-ARG MIT_MODELS="detector.default,ocr.48px,inpaint.lama_large"
-RUN cd "${MIT_ROOT}" \
-    && python -u docker_prepare.py --models "${MIT_MODELS}" \
-    && du -sh "${MIT_ROOT}/models"
+RUN python -u - <<'PYEOF'
+import asyncio, os, sys
+from manga_translator.config import Detector, Inpainter, Ocr
+from manga_translator.detection import DETECTORS
+from manga_translator.inpainting import INPAINTERS
+from manga_translator.ocr import OCRS
+from manga_translator.utils import ModelWrapper
+
+WANTED = [
+    ("detector", DETECTORS, [Detector.default]),
+    # 48px is the default; mocr is offered in the UI, so bake its checkpoint
+    # too or picking it would trigger a download on a running Space.
+    ("ocr", OCRS, [Ocr.ocr48px, Ocr.mocr]),
+    ("inpainter", INPAINTERS, [Inpainter.lama_large]),
+]
+
+async def main():
+    for stage, registry, keys in WANTED:
+        for key in keys:
+            cls = registry[key]
+            if not issubclass(cls, ModelWrapper):
+                print(f"    {stage}.{key.value}: no weights to fetch", flush=True)
+                continue
+            print(f"--> {stage}.{key.value} ({cls.__name__})", flush=True)
+            await cls().download()
+
+asyncio.run(main())
+
+# Assert the weights actually landed. Upstream's filter silently downloading
+# nothing is exactly the failure this guards against.
+root = os.environ["MIT_ROOT"]
+model_dir = os.path.join(root, "models")
+total = 0
+if os.path.isdir(model_dir):
+    for dirpath, _, names in os.walk(model_dir):
+        for n in names:
+            total += os.path.getsize(os.path.join(dirpath, n))
+print(f"baked weights: {total / 1e6:.0f} MB in {model_dir}", flush=True)
+if total < 50_000_000:
+    sys.exit(f"FATAL: expected baked model weights, found {total} bytes")
+PYEOF
 
 # ---------------------------------------------------------------------------
 # 7. manga-ocr weights. Upstream pulls these lazily inside _load(), i.e. at
@@ -216,7 +265,6 @@ ENV CUSTOM_OPENAI_API_BASE=http://127.0.0.1:8081/v1 \
     LLAMA_HOST=127.0.0.1 \
     LLAMA_PORT=8081 \
     APP_PORT=7860 \
-    PYTHONPATH=/opt/manga-image-translator:/app \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
