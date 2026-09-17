@@ -266,7 +266,8 @@ ENV CUSTOM_OPENAI_API_BASE=http://127.0.0.1:8081/v1 \
     LLAMA_PORT=8081 \
     APP_PORT=7860 \
     HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
+    TRANSFORMERS_OFFLINE=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Spaces runs the container as UID 1000, and /data only exists at runtime when
 # a storage bucket is attached, so scratch space lives in /tmp instead.

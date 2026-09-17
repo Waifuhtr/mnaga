@@ -158,6 +158,18 @@ Aşağıdakiler tahmin değil, gerçek model ve gerçek kaynak kod üzerinde tes
   **içermiyor** (fontTools ile doğrulandı) — bu fontlarla Türkçe çıktı bozuk
   görünürdü. Varsayılan bu yüzden `comic shanns 2.ttf`: hem çizgi roman görünümü
   var hem de Türkçe karakterlerin tamamını içeriyor.
+* **Metin silme (inpainting) T4'te VRAM'i patlatabiliyor — asıl tuzak buydu.**
+  `lama_large`, gerçek bir manga sayfasında (1280x1816) tek seferde **13.58 GiB**
+  ayırmaya çalışıyor; T4'ün 14.74 GiB'ının ~5.5 GiB'ı zaten llama.cpp'de olduğu
+  için CUDA OOM veriyor. Upstream bu hatayı yakalayınca
+  `ctx.img_inpainted = ctx.img_rgb` yapıp **orijinal görsele geri düşüyor** ve
+  çeviri, silinmemiş metnin üstüne basılıyor — iş "başarılı" görünüyor ama sayfa
+  okunmaz oluyor. Üç şey değişti: varsayılan inpainting çözünürlüğü 2048'den
+  **1024**'e indi (bellek çözünürlüğün karesiyle büyüyor), OOM'da çözünürlüğü
+  kademeli düşüren bir **yeniden deneme** eklendi ve `ignore_errors` **False**
+  yapıldı ki hata bir daha sessizce bozuk çıktıya dönüşmesin.
+  Not: bu hata benim ilk testlerimde çıkmadı çünkü 700x500'lük sentetik sayfalarla
+  test etmiştim; gerçek sayfa boyutuyla test etmek şarttı.
 * **GPU algılaması yalnızca `nvidia-smi`'ye güvenmiyor.** Temel image artık
   `nvidia/cuda` değil düz `ubuntu` olduğu için `nvidia-smi` yalnızca konteyner
   çalışma zamanı enjekte ederse bulunur. Tek başına ona güvenmek, T4'te GPU

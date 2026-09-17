@@ -136,6 +136,7 @@ async function start() {
   fd.append('ocr', $('ocr').value);
   fd.append('inpainter', $('inpainter').value);
   fd.append('detection_size', $('detection_size').value);
+  fd.append('inpainting_size', $('inpainting_size').value);
   fd.append('font_size_offset', $('font_size_offset').value);
   fd.append('debug', $('debug').checked ? 'true' : 'false');
 
@@ -209,6 +210,7 @@ function render(d) {
         <img loading="lazy" src="/api/jobs/${d.id}/page/${p.index}?t=${p.seconds}" alt="${escapeHtml(p.name)}"
              onclick="openViewer(this.src)">
         <div class="meta"><span class="nm">${escapeHtml(p.name)}</span><span class="st done">${p.regions} blok</span></div>
+        ${p.warning ? `<div class="warn">${escapeHtml(p.warning)}</div>` : ''}
       </div>`;
     }
     const label = { pending: 'sırada', running: 'çevriliyor', error: 'hata' }[p.status] || p.status;

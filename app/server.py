@@ -58,6 +58,16 @@ LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "8081"))
 # cover them. Verified with fontTools against the actual font files.
 DEFAULT_FONT = os.environ.get("RENDER_FONT", "comic shanns 2.ttf")
 
+# Inpainting is by far the most VRAM-hungry stage, and it scales with the
+# square of the working resolution. Measured on a T4 (15 GiB, ~5.5 GiB of it
+# already held by llama.cpp): lama_large at 1280x1816 tried to allocate
+# 13.58 GiB and died with CUDA OOM, while 704x504 was fine. Upstream's default
+# of 2048 therefore means "no downscaling" for a normal manga page and blows up.
+# 1024 on the long side lands around 4 GiB, which fits with room to spare.
+DEFAULT_INPAINT_SIZE = int(os.environ.get("INPAINT_SIZE", "1024"))
+# Tried in order when the GPU still runs out of memory.
+INPAINT_FALLBACKS = [1024, 768, 512]
+
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 MAX_UPLOAD_FILES = int(os.environ.get("MAX_UPLOAD_FILES", "300"))
 
@@ -77,6 +87,7 @@ try:
     from manga_translator.config import (  # type: ignore
         Detector,
         DetectorConfig,
+        InpaintPrecision,
         Inpainter,
         InpainterConfig,
         Ocr,
@@ -144,6 +155,7 @@ class PageResult:
     name: str
     status: str = "pending"          # pending | running | done | error
     error: Optional[str] = None
+    warning: Optional[str] = None
     regions: int = 0
     seconds: float = 0.0
 
@@ -191,6 +203,7 @@ class Job:
                     "name": p.name,
                     "status": p.status,
                     "error": p.error,
+                    "warning": p.warning,
                     "regions": p.regions,
                     "seconds": round(p.seconds, 1),
                 }
@@ -241,7 +254,10 @@ async def get_translator() -> "MangaTranslator":
             "kernel_size": 3,
             "use_gpu": use_gpu,
             "verbose": False,
-            "ignore_errors": True,
+            # Deliberately False. With True, upstream turns a failed inpainting
+            # into a silently un-erased page instead of an error, which is how a
+            # GPU OOM ended up looking like a successful but unreadable result.
+            "ignore_errors": False,
             "font_path": str(font) if font.exists() else None,
             "models_ttl": 0,
             "batch_size": 1,
@@ -251,7 +267,7 @@ async def get_translator() -> "MangaTranslator":
         return _translator
 
 
-def build_config(options: Dict[str, Any]) -> "Config":
+def build_config(options: Dict[str, Any], inpainting_size: Optional[int] = None) -> "Config":
     """Translate UI options into an upstream Config object."""
     ocr_choice = Ocr.mocr if options.get("ocr") == "mocr" else Ocr.ocr48px
     inpainter = Inpainter.lama_large if options.get("inpainter", "lama_large") == "lama_large" else Inpainter.none
@@ -278,7 +294,13 @@ def build_config(options: Dict[str, Any]) -> "Config":
             detector=Detector.default,
             detection_size=int(options.get("detection_size", 2048)),
         ),
-        inpainter=InpainterConfig(inpainter=inpainter),
+        inpainter=InpainterConfig(
+            inpainter=inpainter,
+            inpainting_size=int(inpainting_size or options.get("inpainting_size") or DEFAULT_INPAINT_SIZE),
+            # T4 is Turing and has no native bf16; fp16 is both supported and
+            # half the activation memory of fp32.
+            inpainting_precision=InpaintPrecision.fp16,
+        ),
         render=render,
         kernel_size=3,
     )
@@ -287,6 +309,65 @@ def build_config(options: Dict[str, Any]) -> "Config":
 # --------------------------------------------------------------------------- #
 # Job execution
 # --------------------------------------------------------------------------- #
+def _is_oom(exc: BaseException) -> bool:
+    """CUDA OOM arrives as torch.OutOfMemoryError, or a RuntimeError saying so."""
+    if type(exc).__name__ == "OutOfMemoryError":
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+def _free_vram() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+async def translate_page(translator: "MangaTranslator", image, page: PageResult,
+                         options: Dict[str, Any]):
+    """
+    Run one page, stepping the inpainting resolution down if the GPU runs out
+    of memory.
+
+    This exists because of how upstream reacts to an inpainting failure: with
+    ignore_errors set it does `ctx.img_inpainted = ctx.img_rgb`, i.e. it falls
+    back to the ORIGINAL image and then renders the translation on top of text
+    that was never erased. The job reports success while the page is actually
+    unreadable. So errors are raised here and handled explicitly instead.
+
+    Inpainting memory grows with the square of the working resolution, so a
+    smaller size is a real fix rather than a coin flip.
+    """
+    requested = int(options.get("inpainting_size") or DEFAULT_INPAINT_SIZE)
+    sizes = [requested] + [s for s in INPAINT_FALLBACKS if s < requested]
+    last: Optional[BaseException] = None
+
+    for attempt, size in enumerate(sizes):
+        cfg = build_config(options, inpainting_size=size)
+        try:
+            ctx = await translator.translate(image.copy(), cfg, image_name=page.name)
+            if attempt:
+                page.warning = (
+                    f"GPU belleği yetmediği icin metin silme {size}px'e dusuruldu."
+                )
+            return ctx
+        except Exception as exc:
+            last = exc
+            if not _is_oom(exc):
+                raise
+            log.warning("page %s: CUDA OOM at inpainting_size=%s, retrying smaller",
+                        page.name, size)
+            _free_vram()
+
+    raise RuntimeError(
+        "GPU bellegi yetmedi: metin silme en dusuk cozunurlukte bile basarisiz oldu."
+    ) from last
+
+
 async def run_job(job: Job) -> None:
     async with JOB_LOCK:
         job.status = "running"
@@ -294,7 +375,6 @@ async def run_job(job: Job) -> None:
         job.message = "Modeller hazırlanıyor…"
         try:
             translator = await get_translator()
-            config = build_config(job.options)
 
             hook_state = {"stage": ""}
 
@@ -317,7 +397,7 @@ async def run_job(job: Job) -> None:
                     if image.mode not in ("RGB", "RGBA"):
                         image = image.convert("RGB")
 
-                    ctx = await translator.translate(image, config, image_name=page.name)
+                    ctx = await translate_page(translator, image, page, job.options)
 
                     result = getattr(ctx, "result", None)
                     if result is None:
@@ -342,6 +422,8 @@ async def run_job(job: Job) -> None:
                 finally:
                     page.seconds = time.time() - started
                     job.done_count = index + 1
+                    # Release whatever the vision models held before the next page.
+                    _free_vram()
 
             ok = sum(1 for p in job.pages if p.status == "done")
             failed = sum(1 for p in job.pages if p.status == "error")
@@ -413,6 +495,7 @@ async def create_job(
     ocr: str = Form("48px"),
     inpainter: str = Form("lama_large"),
     detection_size: int = Form(2048),
+    inpainting_size: int = Form(DEFAULT_INPAINT_SIZE),
     font_size_offset: int = Form(0),
     debug: bool = Form(False),
 ) -> JSONResponse:
@@ -428,6 +511,7 @@ async def create_job(
         "ocr": ocr,
         "inpainter": inpainter,
         "detection_size": detection_size,
+        "inpainting_size": inpainting_size,
         "font_size_offset": font_size_offset,
     }
     job.in_dir.mkdir(parents=True, exist_ok=True)

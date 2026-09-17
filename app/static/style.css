@@ -214,6 +214,12 @@ select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .result .meta .st.error { color: var(--err); }
 .result .meta .st.running { color: var(--warn); }
 .result .meta .st.pending { color: var(--muted); }
+.result .warn {
+  padding: 8px 9px;
+  font-size: 12px;
+  color: #e8c26a;
+  border-top: 1px solid var(--line);
+}
 .result .err { padding: 8px 9px; font-size: 12px; color: #ffb4ae; }
 
 pre {

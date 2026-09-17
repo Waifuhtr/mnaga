@@ -90,11 +90,12 @@ else
     log "offload    : DISABLED (translation will be slow but functional)"
 fi
 
-# Context budget. Manga lines are short; a large context would only waste VRAM.
-# 8192 total across 2 slots = 4096 per slot, which matches the upstream
-# translator's _MAX_TOKENS.
-CTX_SIZE=${LLAMA_CTX_SIZE:-8192}
-PARALLEL=${LLAMA_PARALLEL:-2}
+# Context budget. Manga lines are short, and on a 16 GB T4 this model competes
+# for VRAM with lama inpainting, which is the real memory hog. One slot at 4096
+# still matches the upstream translator's _MAX_TOKENS while leaving the KV cache
+# small, so keep it tight rather than generous.
+CTX_SIZE=${LLAMA_CTX_SIZE:-4096}
+PARALLEL=${LLAMA_PARALLEL:-1}
 THREADS=${LLAMA_THREADS:-4}
 
 log "context    : ${CTX_SIZE} across ${PARALLEL} slots"
