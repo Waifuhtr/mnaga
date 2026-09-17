@@ -24,8 +24,10 @@ dosyaları ise build sırasında image katmanlarına gömülür.
 
 ## Donanım
 
-Önce **CPU (8 vCPU / 32 GB)** ile build edin — bütün ağır indirme ve kurulum
-işleri burada biter. Sonra donanımı **T4 Small**'a çevirin; konteyner aynı image
-katmanlarından açılır, hiçbir şey yeniden indirilmez ve GPU offload devreye girer.
+Önce **CPU (8 vCPU / 32 GB)** ile build edin, sonra donanımı **T4 Small**'a
+çevirin. Donanım değişikliği image'ı yeniden build ettirir (~7 dk, otomatik);
+build bittiğinde GPU offload kendiliğinden devreye girer.
+
+Çalışma anında hiçbir model indirilmez: her şey build sırasında image'a gömülür.
 
 Çalışırken `/health` uç noktası modelin, llama-server'ın ve GPU'nun durumunu döner.

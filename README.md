@@ -14,7 +14,16 @@ Japonca / İngilizce manga sayfalarını **Türkçeye** çeviren, Hugging Face S
 | Aşama | Donanım | Ne olur |
 |---|---|---|
 | **Build** | 8 vCPU / 32 GB (GPU yok) | Bütün pahalı işler burada biter: bağımlılıklar, llama.cpp ikilileri, M.I.T. modelleri ve 4.62 GB'lık Hy-MT2 image katmanlarına yazılır. |
-| **Runtime** | T4 Small (4 vCPU / 15 GB RAM / 16 GB VRAM) | Konteyner aynı katmanlardan açılır. **Hiçbir şey yeniden indirilmez.** GPU görülürse Hy-MT2 tamamen GPU'ya offload edilir. |
+| **Runtime** | T4 Small (4 vCPU / 15 GB RAM / 16 GB VRAM) | GPU görülürse Hy-MT2 tamamen GPU'ya offload edilir ve **runtime'da hiçbir indirme yapılmaz.** |
+
+> **Donanım değiştirmek yeniden build tetikler.** Ölçüldü: CPU'dan T4'e geçişte
+> HF Spaces image'ı sıfırdan yeniden kurdu, build günlüğünde tek bir `CACHED`
+> katman yoktu ve 4.62 GB'lık model tekrar indi. Yani "donanım değişince model
+> yeniden inmesin" hedefi HF Spaces'ta katman cache'i ile sağlanamıyor.
+> Elde kalan ve asıl önemli olan kazanç şu: build **otomatik ve ~7 dakika**
+> sürüyor (modelin payı ~72 sn), deterministik (sabit revision + SHA-256) ve
+> **çalışma anında tek bir indirme bile yapılmıyor** — konteyner internet
+> kapalıyken de açılır.
 
 Build sırasında CUDA inference **başlatılmaz**; GPU yalnızca runtime'da,
 `scripts/entrypoint.sh` içindeki `nvidia-smi` kontrolüyle devreye girer. GPU
@@ -65,6 +74,10 @@ sırasında yalnızca **son katmanın** cache'ini kırmak içindir.
 | Algılama / OCR / inpainting | `/opt/manga-image-translator/models/` (image) | hayır |
 | manga-ocr | `/opt/hf-cache/` (image) | hayır |
 | Yazı tipi | `/opt/manga-image-translator/fonts/comic shanns 2.ttf` (image) | hayır |
+
+Ölçülen hız (T4 Small, 2 metin bloklu sayfa): ilk sayfa ~3.7 sn (modeller
+VRAM'e yükleniyor), sonrası **~2.0 sn/sayfa**. Aynı sayfa CPU'da 32.1 sn
+sürüyordu — yaklaşık **16× fark**.
 
 `HF_HUB_OFFLINE=1` ve `TRANSFORMERS_OFFLINE=1` ayarlıdır: bir kütüphane runtime'da
 gizlice indirme yapmaya kalkarsa sessizce beklemek yerine hata verir. **Uygulama
