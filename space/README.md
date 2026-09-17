@@ -7,7 +7,7 @@ sdk: docker
 app_port: 7860
 pinned: false
 license: gpl-3.0
-short_description: Japonca/İngilizce manga sayfalarını Hy-MT2-7B ile Türkçeye çevirir
+short_description: Manga sayfalarını Hy-MT2-7B ile Türkçeye çevirir
 ---
 
 # Manga Çeviri — Hy-MT2-7B
