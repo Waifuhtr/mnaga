@@ -130,6 +130,19 @@ Aşağıdakiler tahmin değil, gerçek model ve gerçek kaynak kod üzerinde tes
   **içermiyor** (fontTools ile doğrulandı) — bu fontlarla Türkçe çıktı bozuk
   görünürdü. Varsayılan bu yüzden `comic shanns 2.ttf`: hem çizgi roman görünümü
   var hem de Türkçe karakterlerin tamamını içeriyor.
+* **Temel image ve Python sürümü.** llama.cpp'nin resmi CUDA release ikilileri
+  **GLIBC 2.38**'e bağlı; Ubuntu 22.04 yalnızca 2.35 veriyor ve `llama-server`
+  açılmıyordu (yalnızca CPU tarball'ı 2.29 ile yetiniyor, bu yüzden sorun
+  sadece CUDA yapısında çıkıyor). Bu yüzden temel image **Ubuntu 24.04**.
+  24.04 Python 3.12 ile geliyor ama M.I.T. `<3.12` istiyor; Python 3.11
+  deadsnakes'ten kuruluyor ve her şey bir venv içinde çalışıyor. Ayrıca
+  24.04'te `libglib2.0-0` paketi `libglib2.0-0t64` olarak yeniden
+  adlandırılmış durumda.
+* **`libgomp1` gerekiyor.** CUDA runtime image'ı OpenMP çalışma zamanını
+  içermiyor; ggml'in CPU backend'leri (`libggml-cpu-*.so`) buna bağlı.
+  Eksikken `llama-server` çalışmıyordu. Dockerfile'daki
+  `llama-server --version` adımı bunu **build sırasında** yakalayan sert bir
+  kontroldür; runtime'a kadar beklemez.
 * **Prompt.** Upstream'in ~1600 karakterlik üç adımlı prompt'u da denendi ve
   çalışıyor; ancak `config/gpt_config.yaml` içindeki 642 karakterlik sürüm aynı
   kaliteyi veriyor ve her istekten ~400 token siliyor. Bir bölüm boyunca bu

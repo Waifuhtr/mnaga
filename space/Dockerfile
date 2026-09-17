@@ -22,7 +22,7 @@
 # same layers with no re-download.
 ###############################################################################
 
-FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -30,18 +30,35 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # ---------------------------------------------------------------------------
-# 1. OS packages. Ubuntu 22.04 ships Python 3.10, which is what
-#    manga-image-translator requires (pyproject: >=3.10, <3.12).
+# 1. OS packages.
+#
+#    The base has to be 24.04: the official llama.cpp CUDA release binaries are
+#    linked against GLIBC 2.38 and 22.04 only provides 2.35. (Their CPU-only
+#    tarball needs just 2.29, which is why this bites the CUDA build alone.)
+#
+#    24.04 ships Python 3.12, but manga-image-translator wants >=3.10,<3.12, so
+#    Python 3.11 comes from deadsnakes and all Python work happens in a venv -
+#    which also avoids 24.04's PEP 668 "externally managed environment" refusal.
+#
+#    libglib2.0-0 no longer exists on 24.04; it is libglib2.0-0t64 after the
+#    64-bit time_t transition.
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-dev python3-pip \
+        software-properties-common gpg-agent \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-dev python3.11-venv \
         git curl ca-certificates \
         libgomp1 \
-        libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+        libgl1 libglib2.0-0t64 libsm6 libxext6 libxrender1 \
         fonts-noto-cjk fonts-dejavu-core \
-    && ln -sf /usr/bin/python3.10 /usr/local/bin/python \
-    && ln -sf /usr/bin/python3.10 /usr/local/bin/python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Putting the venv first on PATH makes `python` and `pip` resolve to 3.11 for
+# every layer below, including the model prefetch steps and the entrypoint.
+RUN python3.11 -m venv /opt/venv \
+    && /opt/venv/bin/python --version
+ENV PATH=/opt/venv/bin:$PATH
 
 # ---------------------------------------------------------------------------
 # 2. llama.cpp, official prebuilt CUDA 12.8 binaries.
