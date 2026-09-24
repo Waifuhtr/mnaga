@@ -543,6 +543,11 @@ async def get_translator() -> "MangaTranslator":
 # dark bubble. Overridable so it can be tuned without a rebuild.
 DARK_BUBBLE_MAX = int(os.environ.get("DARK_BUBBLE_MAX", "100"))
 
+# How far a text block may be pushed to clear a neighbour, as a fraction of its
+# own size along that axis. Enough to separate adjacent bubbles, small enough
+# that a line cannot drift away from the bubble it belongs to.
+MAX_BLOCK_SHIFT = float(os.environ.get("MAX_BLOCK_SHIFT", "0.45"))
+
 _RENDER_PATCHED = False
 
 
@@ -618,15 +623,30 @@ def _install_render_patches() -> None:
              "at mean<=%s)", DARK_BUBBLE_MAX)
 
 
-def _resolve_overlaps(dst_points_list, text_regions, np, Polygon, max_passes: int = 8):
+def _resolve_overlaps(dst_points_list, text_regions, np, Polygon, max_passes: int = 12):
     """
-    Walk each grown block back toward its detected box until blocks stop
-    overlapping.
+    Stop text blocks printing on top of each other.
 
-    t = 1 is upstream's grown quad, t = 0 the detected one; corners correspond
-    because both come from the same min_rect. Blocks the detector itself
-    overlapped stay as they are - undoing that is not ours to invent, and the
-    loop is bounded either way.
+    render() warps the text canvas onto dst_points with a homography, so the
+    text always fills its box exactly and can never spill past it. Two blocks
+    overlap if and only if their boxes overlap - which makes this purely a
+    geometry problem.
+
+    Two phases, in this order on purpose:
+
+      1. Move. Push overlapping boxes apart along the axis of least
+         penetration. Size is untouched, so line wrapping is exactly as
+         upstream chose it.
+      2. Shrink. Only for what moving could not separate, walk the box back
+         toward the one the detector found, undoing upstream's growth.
+
+    Moving comes first because shrinking costs legibility: a narrower box
+    means the same text rewrapped into a narrower column, which is how
+    "homurdanip" ends up split as "HOMU / RDANIP". The shift is capped so a
+    line cannot wander far from the bubble it belongs to.
+
+    Blocks the detector itself overlapped, with no room left to move, keep
+    their overlap - inventing a layout for them is not ours to do.
     """
     if len(dst_points_list) < 2:
         return dst_points_list
@@ -636,33 +656,81 @@ def _resolve_overlaps(dst_points_list, text_regions, np, Polygon, max_passes: in
         grown.append(np.asarray(points, dtype=float).reshape(4, 2))
         base.append(np.asarray(region.min_rect, dtype=float).reshape(4, 2))
 
-    t = [1.0] * len(grown)
+    n = len(grown)
+    quads = [q.copy() for q in grown]
+    shift = [np.zeros(2) for _ in range(n)]
+    t = [1.0] * n
 
-    def at(i: int) -> "Polygon":
-        return Polygon(base[i] + t[i] * (grown[i] - base[i]))
+    def poly(i):
+        return Polygon(base[i] + t[i] * (grown[i] - base[i]) + shift[i])
 
+    def clashes():
+        out = []
+        polys = [poly(i) for i in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                if polys[i].intersects(polys[j]) and polys[i].intersection(polys[j]).area > 1.0:
+                    out.append((i, j))
+        return out
+
+    # --- phase 1: move apart, keeping every box its own size ---------------
     for _ in range(max_passes):
-        polys = [at(i) for i in range(len(grown))]
-        clashed = False
-        for i in range(len(grown)):
-            for j in range(i + 1, len(grown)):
-                if not polys[i].intersects(polys[j]):
-                    continue
-                if polys[i].intersection(polys[j]).area <= 1.0:
-                    continue
-                clashed = True
-                for k in (i, j):
-                    t[k] = max(0.0, t[k] - 0.25)
-        if not clashed:
+        pairs = clashes()
+        if not pairs:
             break
+        for i, j in pairs:
+            a, b = np.array(poly(i).exterior.coords[:4]), np.array(poly(j).exterior.coords[:4])
+            ax0, ay0, ax1, ay1 = a[:, 0].min(), a[:, 1].min(), a[:, 0].max(), a[:, 1].max()
+            bx0, by0, bx1, by1 = b[:, 0].min(), b[:, 1].min(), b[:, 0].max(), b[:, 1].max()
+            over_x = min(ax1, bx1) - max(ax0, bx0)
+            over_y = min(ay1, by1) - max(ay0, by0)
+            if over_x <= 0 or over_y <= 0:
+                continue
 
-    pulled = sum(1 for v in t if v < 1.0)
-    if pulled:
-        log.info("overlap resolution pulled %d of %d text blocks back",
-                 pulled, len(grown))
+            # Pick the axis that can actually separate them, not merely the one
+            # with the smaller overlap. Two boxes sitting side by side share
+            # their whole height, so the vertical overlap is the smaller number
+            # while being the one direction they cannot be parted in: clearing
+            # it would mean sliding a line a full box-height off its bubble,
+            # which the cap rightly refuses. Compare each axis's requirement
+            # against what the caps allow, and prefer one that fits.
+            budget_x = MAX_BLOCK_SHIFT * ((ax1 - ax0) + (bx1 - bx0))
+            budget_y = MAX_BLOCK_SHIFT * ((ay1 - ay0) + (by1 - by0))
+            fits_x, fits_y = budget_x >= over_x, budget_y >= over_y
+            if fits_x != fits_y:
+                axis = 0 if fits_x else 1
+            elif fits_x:                      # both work - take the cheaper move
+                axis = 0 if over_x <= over_y else 1
+            else:                             # neither clears; go where we get furthest
+                axis = 0 if (over_x - budget_x) <= (over_y - budget_y) else 1
 
-    return [np.array(at(i).exterior.coords[:4]).reshape(1, 4, 2).astype(np.int64)
-            for i in range(len(grown))]
+            span_a = (ax1 - ax0) if axis == 0 else (ay1 - ay0)
+            span_b = (bx1 - bx0) if axis == 0 else (by1 - by0)
+            push = (over_x if axis == 0 else over_y) / 2.0 + 1.0
+            a_first = ((ax0 + ax1) < (bx0 + bx1)) if axis == 0 else ((ay0 + ay1) < (by0 + by1))
+            for k, span, direction in ((i, span_a, -1.0 if a_first else 1.0),
+                                       (j, span_b, 1.0 if a_first else -1.0)):
+                cap = MAX_BLOCK_SHIFT * span
+                want = shift[k][axis] + direction * push
+                shift[k][axis] = float(np.clip(want, -cap, cap))
+
+    # --- phase 2: whatever is still colliding gives back its growth --------
+    for _ in range(max_passes):
+        pairs = clashes()
+        if not pairs:
+            break
+        for i, j in pairs:
+            for k in (i, j):
+                t[k] = max(0.0, t[k] - 0.25)
+
+    moved = sum(1 for v in shift if abs(v[0]) + abs(v[1]) > 0.5)
+    shrunk = sum(1 for v in t if v < 1.0)
+    if moved or shrunk:
+        log.info("overlap resolution: moved %d, shrank %d of %d text blocks",
+                 moved, shrunk, n)
+
+    return [np.array(poly(i).exterior.coords[:4]).reshape(1, 4, 2).astype(np.int64)
+            for i in range(n)]
 
 
 def _clear_glyph_cache() -> None:

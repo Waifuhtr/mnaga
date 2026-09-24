@@ -365,33 +365,51 @@ bize ait: `run_job()` her işte `text_render.get_char_glyph.cache_clear()`
 
 ## Üst üste binen baloncuklar
 
-Çeviri kaynaktan uzun geldiğinde upstream metin kutusunu büyütüyor. Bunu
-yaparken görüntü sınırına kırpmayı **bilerek** kapatmış:
+`render()` metin tuvalini `dst_points`'e homografi ile **warp ediyor**:
 
 ```python
-# 移除边界限制，允许文本超出检测框边界
-# dst_points[..., 0] = dst_points[..., 0].clip(0, img.shape[1] - 1)
+M, _ = cv2.findHomography(src_points, dst_points, ...)
+rgba_region = cv2.warpPerspective(box, M, ...)
 ```
 
-Komşu kutularla çakışma kontrolü ise hiç yok — upstream'in kendi `dispatch()`
-fonksiyonunda şu not duruyor:
+Yani metin kutusunu asla taşmıyor, tam dolduruyor. Buradan çıkan sonuç net:
+**iki metin çakışıyorsa kutuları çakışıyordur.** Sorun tamamen geometri.
 
-```python
-dst_points_list = resize_regions_to_font_size(...)
-# TODO: Maybe remove intersections
-```
+Çeviri uzun geldiğinde upstream kutuyu büyütüyor ve sınır kırpmasını bilerek
+kapatmış (`# 移除边界限制…`), komşu kontrolü ise hiç yok — kendi `dispatch()`
+fonksiyonunda `# TODO: Maybe remove intersections` notu duruyor. Türkçe
+İngilizce'den uzun olduğu için bu sürekli tetikleniyor.
 
-Türkçe çeviriler İngilizce kaynaktan uzun olduğu için bu bizde sürekli
-tetikleniyordu: iki baloncuk üst üste basılıyordu.
+Çözüm iki aşamalı, **sırası bilinçli**:
 
-Çözüm: büyütülmüş her kutu, **dedektörün gerçekten bulduğu kutuya doğru**
-geri yürütülüyor (upstream'in büyüttüğü yönün tersine), çakışma bitene kadar.
-`t=1` upstream'in büyüttüğü hali, `t=0` tespit edilen hali. Dedektörün kendi
-çakıştırdığı bölgeler olduğu gibi bırakılıyor — onu düzeltmek bizim işimiz
-değil, hem döngü de sınırlı.
+1. **İt.** Çakışan kutular birbirinden itiliyor. Boyut değişmiyor, yani satır
+   sarması upstream'in seçtiği gibi kalıyor.
+2. **Küçült.** Sadece itmenin ayıramadığı kadarı için kutu, dedektörün bulduğu
+   kutuya doğru geri yürütülüyor.
 
-Yerel testte: 8000 px² çakışma → 0, kutu tespit edilen genişliğine dönüyor,
-çakışmayan kutulara hiç dokunulmuyor.
+İtme önce geliyor çünkü küçültmek okunabilirliğe mal oluyor: dar kutu = aynı
+metnin daha dar bir sütuna sarılması, `homurdanıp` kelimesinin
+`HOMU / RDANIP` diye bölünmesinin sebebi buydu.
+
+**Eksen seçimi kritik.** "Daha küçük örtüşme" sezgiseli yanlış: yan yana duran
+iki kutu tüm yüksekliklerini paylaşır, yani dikey örtüşme daha küçük sayıdır
+ama tam da ayrılamayacakları yöndür — onu kapatmak satırı bir kutu boyu
+baloncuğundan uzaklaştırmak demek. Onun yerine her eksenin gereksinimi kayma
+sınırıyla karşılaştırılıp **gerçekten ayırabilen** eksen seçiliyor.
+
+Kayma, kutunun kendi boyunun `MAX_BLOCK_SHIFT` katıyla sınırlı (varsayılan
+0.45) — komşu baloncukları ayırmaya yeter, satırın baloncuğundan kopmasına
+yetmez.
+
+Yerel testler (hepsi çakışmayı 0'a indiriyor):
+
+| senaryo | önce | sonra | boyutlar |
+|---|---|---|---|
+| yan yana, upstream sağa büyütmüş | 8000 px² | 0 | korundu |
+| dedektör kutuları çakışıyor | 9800 px² | 0 | korundu |
+| üst üste dizili | 2000 px² | 0 | korundu |
+| neredeyse tam üst üste | 26450 px² | 0 | küçüldü (itme yetmiyor) |
+| çakışma yok | 0 | 0 | dokunulmadı |
 
 ---
 
