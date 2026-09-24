@@ -51,6 +51,15 @@ header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.02em; }
 /* Which commit the running image was built from. Deliberately quiet - it only
    matters when something looks stale, and then it is the first thing to check. */
 .build { margin: 8px 0 0; font-size: 12px; opacity: 0.75; }
+/* Turkish sample drawn with the selected font. A face can pass every glyph
+   check and still draw the wrong shapes, so the only real check is looking. */
+.font-preview {
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
 
 main {
   max-width: 900px;

@@ -315,6 +315,54 @@ indiriyor. Elle `Ctrl+F5` gerekmiyor.
 
 ---
 
+## Font doğrulama (önemli)
+
+Bir font, **her Türkçe harf için glif taşıyabilir**, o gliflerin **hepsi
+birbirinden farklı olabilir**, ve yine de **yanlış şekilleri çizebilir**.
+`assets/fonts/` içindeki yamalı bir yüz tam olarak bunu yaptı:
+
+| Font | Örnek çıktı |
+|---|---|
+| `CCWildWords.ttf` | `ÖZÜR DİLERİM · KAÇ SAÇ ĞÜŞIÖÇ` ✅ |
+| `anime_ace.ttf` | `UZbR DİLERİM · KA3 SA3 ğbŞIU3` ❌ |
+| `anime_ace_3.ttf` | aynı bozukluk ❌ |
+
+Bozuk olanlarda `Ğ Ş İ` doğru, ama `Ö→U`, `Ü→b`, `Ç→3`. Glifler mevcut ve
+benzersiz olduğu için **hiçbir otomatik kontrol bunu yakalayamıyor** — varlık
+kontrolü de, glif-indeksi karşılaştırması da, diakritik yüksekliği sezgiseli de
+bu fontu "temiz" ilan etti. Yakalayan tek şey render edip bakmak.
+
+Bu yüzden arayüzde font seçicinin altında **o fontla çizilmiş Türkçe örnek**
+gösteriliyor (`/api/fonts/preview/<key>`). GPU harcamaz, çeviri çalıştırmaz;
+bozuk bir font bir sayfa bile işlenmeden görünür.
+
+---
+
+## Font değiştirince eski fontla çizilmesi
+
+Upstream glifleri şöyle önbelleğe alıyor:
+
+```python
+@functools.lru_cache(maxsize=1024, typed=True)
+def get_char_glyph(cdpt: str, font_size: int, direction: int) -> Glyph:
+    global FONT_SELECTION
+```
+
+Önbellek anahtarında **font yok**; yüz, `set_font()`'un değiştirdiği global
+`FONT_SELECTION`'dan geliyor. Yani bir karakter bir kez çizildikten sonra,
+sonradan hangi font seçilirse seçilsin aynı bitmap dönüyor — font değişimini
+izleyen sayfa **bir önceki fontla** render ediliyor.
+
+Gerçek yüzlerle doğrulandı: önbellek sıcakken `'ü'` 30px'te anime_ace ve
+CCWildWords için **byte-byte aynı** bitmap'i döndürdü; önbellek temizlenince
+iki farklı bitmap geldi.
+
+İş başına font seçimi bizim eklediğimiz bir özellik olduğu için temizliği de
+bize ait: `run_job()` her işte `text_render.get_char_glyph.cache_clear()`
+çağırıyor.
+
+---
+
 ## Toplu yükleme ve sayfa sırası
 
 * **Tek görsel**, **çoklu görsel** ve **ZIP** yüklenebilir; hepsi aynı anda olabilir.

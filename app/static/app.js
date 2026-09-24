@@ -133,6 +133,7 @@ async function loadFonts() {
 function showFontNote() {
   const f = fontInfo[$('font').value];
   const note = $('font-note');
+  showFontPreview($('font').value);
   if (!f) { note.textContent = ''; return; }
   if (f.turkish === 'partial') {
     note.textContent = `⚠ ${f.missing_glyphs} harfleri bu yazı tipinde yok, yedekten gelir.`;
@@ -141,6 +142,19 @@ function showFontNote() {
   } else {
     note.textContent = '';
   }
+}
+
+// A font can have a glyph for every Turkish letter, have each of them be
+// unique, and still draw the wrong shapes - one patched face here drew ü as b,
+// ç as 3 and Ö as U while passing every automated check. Looking at it is the
+// only check that works, so the sample is rendered right under the picker.
+function showFontPreview(key) {
+  const img = $('font-preview');
+  if (!img) return;
+  if (!key) { img.hidden = true; return; }
+  img.src = `/api/fonts/preview/${encodeURIComponent(key)}?t=${Date.now()}`;
+  img.hidden = false;
+  img.onerror = () => { img.hidden = true; };
 }
 
 // --------------------------------------------------------------------------

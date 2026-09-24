@@ -530,6 +530,21 @@ async def get_translator() -> "MangaTranslator":
         return _translator
 
 
+def _clear_glyph_cache() -> None:
+    """
+    Drop upstream's memoised glyph bitmaps so the next page renders with the
+    font that is actually selected. Guarded: if upstream ever renames or drops
+    the cache, rendering must keep working rather than the job dying here.
+    """
+    try:
+        from manga_translator.rendering import text_render  # noqa: PLC0415
+
+        text_render.get_char_glyph.cache_clear()
+    except Exception as exc:  # pragma: no cover - depends on upstream internals
+        log.warning("could not clear the glyph cache, a font switch may not "
+                    "take effect on this page: %s", exc)
+
+
 def _odd(value: Any, default: int, low: int, high: int) -> int:
     """
     Clamp to [low, high] and force odd.
@@ -700,6 +715,22 @@ async def run_job(job: Job) -> None:
                 translator.font_path = str(font)
             job.options["font_resolved"] = font.name if font else None
 
+            # Upstream memoises rendered glyphs with
+            #   @functools.lru_cache
+            #   def get_char_glyph(cdpt, font_size, direction)
+            # and resolves the face from a module-level FONT_SELECTION that
+            # set_font() swaps. The font is NOT part of that cache key, so once
+            # a character has been drawn at a given size the cached bitmap is
+            # reused no matter which font is selected afterwards - a page
+            # rendered after a font switch comes out in the PREVIOUS font.
+            #
+            # Reproduced directly against the real faces: 'Ü' at 30px returned
+            # byte-identical bitmaps for anime_ace and CCWildWords while the
+            # cache was warm, and two different bitmaps once it was cleared.
+            #
+            # Per-job font selection is ours, so clearing this is ours too.
+            _clear_glyph_cache()
+
             # Mask refinement reads self.kernel_size, not the config
             # (manga_translator.py: _run_mask_refinement), so the per-job value
             # has to be assigned here the same way the font is.
@@ -863,6 +894,66 @@ async def fonts() -> JSONResponse:
             for f in list_fonts().values()
         ],
     })
+
+
+@app.get("/api/fonts/preview/{key}")
+async def font_preview(key: str) -> Response:
+    """
+    Render a Turkish sample with one font, as a PNG.
+
+    A font can carry a glyph for every Turkish letter, have each of those
+    glyphs be unique, and still draw the wrong shapes - a patched face in
+    assets/fonts/ turned out to draw ü as b, ç as 3 and Ö as U while passing
+    every presence and uniqueness check thrown at it. Nothing short of looking
+    at the output catches that, so the UI shows the output.
+
+    Costs no GPU and no translation: a bad font is visible before a page is
+    ever run through the pipeline.
+    """
+    import io as _io
+
+    import freetype  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+
+    path = resolve_font(key)
+    if path is None:
+        raise HTTPException(404, "Yazı tipi bulunamadı.")
+
+    sample = "ÖZÜR DİLERİM · kaç saç ğüşıöç · ÇĞİÖŞÜ"
+    size, pad = 34, 8
+    try:
+        face = freetype.Face(path.open("rb"))
+        face.set_pixel_sizes(0, size)
+
+        width = pad * 2
+        for ch in sample:
+            face.load_char(ch)
+            width += face.glyph.advance.x >> 6
+        height = int(size * 1.9)
+        canvas = np.zeros((height, max(width, 1)), np.uint8)
+
+        x, baseline = pad, int(size * 1.35)
+        for ch in sample:
+            face.load_char(ch)
+            g = face.glyph
+            bm = g.bitmap
+            if bm.rows and bm.width:
+                y0, x0 = baseline - g.bitmap_top, x + g.bitmap_left
+                y1, x1 = y0 + bm.rows, x0 + bm.width
+                if 0 <= y0 and 0 <= x0 and y1 <= height and x1 <= canvas.shape[1]:
+                    patch = np.array(bm.buffer, np.uint8).reshape(bm.rows, bm.width)
+                    canvas[y0:y1, x0:x1] = np.maximum(canvas[y0:y1, x0:x1], patch)
+            x += g.advance.x >> 6
+
+        buf = _io.BytesIO()
+        Image.fromarray(255 - canvas).save(buf, format="PNG")
+    except Exception as exc:
+        log.warning("font preview failed for %s: %s", path.name, exc)
+        raise HTTPException(500, f"Önizleme oluşturulamadı: {exc}")
+
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/jobs")
