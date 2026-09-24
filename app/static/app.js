@@ -287,6 +287,17 @@ function render(d) {
   const anyDone = d.pages.some((p) => p.status === 'done');
   $('results-card').hidden = !anyDone;
 
+  // What this run ACTUALLY used, straight from the server. Settings that only
+  // exist in a dropdown are easy to misattribute - a run that looked different
+  // because of the detector reads as the page behaving differently.
+  const used = $('used-settings');
+  if (used) {
+    used.textContent = anyDone
+      ? `${d.font || '?'} · algılayıcı: ${d.detector || '?'} · silme: ${d.erase || '?'}` +
+        ` · en küçük yazı: ${d.font_min === -1 ? 'otomatik' : (d.font_min ?? '?') + 'px'}`
+      : '';
+  }
+
   $('results').innerHTML = d.pages.map((p) => {
     if (p.status === 'done') {
       return `<div class="result">

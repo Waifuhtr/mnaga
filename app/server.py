@@ -459,6 +459,7 @@ class Job:
             "detector": self.options.get("detector"),
             "erase": "%s/%s" % (self.options.get("mask_dilation_offset"),
                                 self.options.get("erase_kernel_size")),
+            "font_min": self.options.get("font_size_minimum"),
             "pages": [
                 {
                     "index": i,
