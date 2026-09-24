@@ -1495,7 +1495,11 @@ async def job_page(job_id: str, index: int) -> Response:
     path = page_output_path(job.out_dir, page.name)
     if not path.exists():
         raise HTTPException(404, "Bu sayfanın sonucu henüz hazır değil.")
-    return FileResponse(path, media_type=OUTPUT_MEDIA_TYPE)
+    # The URL carries no extension, so without a filename here a browser
+    # saving the previewed image has nothing to go on and guesses - usually
+    # .png, whatever the bytes actually are. The ZIP already names entries
+    # correctly; this makes a single save agree with it.
+    return FileResponse(path, media_type=OUTPUT_MEDIA_TYPE, filename=path.name)
 
 
 @app.get("/api/jobs/{job_id}/original/{index}")
