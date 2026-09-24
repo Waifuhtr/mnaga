@@ -72,29 +72,58 @@ ENV VENV_SITE=/opt/venv/lib/python3.11/site-packages
 # 2. CUDA libraries, as their own layer.
 #
 #    These are exactly the versions PyTorch 2.9.1+cu128 pins. Installing them
-#    up front means the PyTorch layer below only adds torch itself, so the
-#    largest single layer is roughly halved - which is what the image push runs
-#    out of memory on.
+#    up front means the PyTorch layer below only adds torch itself.
+#
+#    They are then split across FIVE layers rather than one. As a single layer
+#    they came to ~2.9 GB, and the image push is OOM-killed on the largest
+#    single layer - which is why CUDA was separated from PyTorch in the first
+#    place. A cold build (a Factory rebuild reuses nothing) has to materialise
+#    and push every layer, so that peak is what decides whether the push
+#    survives. Split this way the biggest of them is ~800 MB.
+#
+#    Order is load-bearing: a package must not be installed before something it
+#    depends on, or pip resolves that dependency itself and takes the LATEST
+#    version instead of the pin below - and those bytes then sit in the layer
+#    forever even though a later layer replaces the package.
+#      cudnn    -> cublas
+#      cusolver -> cublas, cusparse, nvjitlink
+#      cusparse, cufft -> nvjitlink
 # ---------------------------------------------------------------------------
 RUN python -m pip install --upgrade "pip<25" setuptools wheel \
     && python -m pip install \
         --index-url https://download.pytorch.org/whl/cu128 \
         --extra-index-url https://pypi.org/simple \
-        nvidia-cublas-cu12==12.8.4.1 \
+        nvidia-cuda-runtime-cu12==12.8.90 \
         nvidia-cuda-cupti-cu12==12.8.90 \
         nvidia-cuda-nvrtc-cu12==12.8.93 \
-        nvidia-cuda-runtime-cu12==12.8.90 \
-        nvidia-cudnn-cu12==9.10.2.21 \
-        nvidia-cufft-cu12==11.3.3.83 \
-        nvidia-cufile-cu12==1.13.1.3 \
-        nvidia-curand-cu12==10.3.9.90 \
-        nvidia-cusolver-cu12==11.7.3.90 \
-        nvidia-cusparse-cu12==12.5.8.93 \
-        nvidia-cusparselt-cu12==0.7.1 \
-        nvidia-nccl-cu12==2.27.5 \
-        nvidia-nvjitlink-cu12==12.8.93 \
-        nvidia-nvshmem-cu12==3.3.20 \
         nvidia-nvtx-cu12==12.8.90 \
+        nvidia-nvjitlink-cu12==12.8.93 \
+        nvidia-cufile-cu12==1.13.1.3 \
+        nvidia-curand-cu12==10.3.9.90
+
+RUN python -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        nvidia-cublas-cu12==12.8.4.1
+
+RUN python -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        nvidia-cudnn-cu12==9.10.2.21
+
+RUN python -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        nvidia-cufft-cu12==11.3.3.83 \
+        nvidia-cusparse-cu12==12.5.8.93 \
+        nvidia-cusparselt-cu12==0.7.1
+
+RUN python -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        nvidia-cusolver-cu12==11.7.3.90 \
+        nvidia-nccl-cu12==2.27.5 \
+        nvidia-nvshmem-cu12==3.3.20 \
     && test -f "${VENV_SITE}/nvidia/cuda_runtime/lib/libcudart.so.12" \
     && test -f "${VENV_SITE}/nvidia/cublas/lib/libcublas.so.12"
 
