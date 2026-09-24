@@ -120,7 +120,8 @@ RUN python -m pip install \
 # ---------------------------------------------------------------------------
 ARG LLAMA_CPP_RELEASE=b11022
 ENV LLAMA_LD_PATH=/opt/llama:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib
-RUN curl -fsSL --retry 5 --retry-delay 3 \
+RUN curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors --retry-max-time 600 \
+        --speed-limit 1048576 --speed-time 60 \
         -o /tmp/llama.tar.gz \
         "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-cuda-12.8-x64.tar.gz" \
     && mkdir -p /opt/llama \
@@ -233,8 +234,22 @@ ARG HY_MT2_FILE=Hy-MT2-7B-Q4_K_M.gguf
 ARG HY_MT2_REVISION=ab8472660ac61fac25f1af43fac2599d52a8a775
 ARG HY_MT2_SHA256=9f96256500f3fc1ab4d64336b58f52a949a95ad7516b0c229476eef782f9f77b
 ENV HY_MT2_MODEL_PATH=/opt/models/hy-mt2/Hy-MT2-7B-Q4_K_M.gguf
+# curl's --retry only covers what it calls transient errors: timeouts, FTP 4xx
+# and HTTP 408/429/5xx. A connection that dies MID-BODY is CURLE_PARTIAL_FILE
+# (exit 18) and is NOT on that list, so plain --retry gives up instantly - this
+# download died at 2768 MB of 4410 MB and the build failed without one retry.
+#
+# --retry-all-errors brings exit 18 into scope, and -C - resumes from the bytes
+# already on disk instead of starting the 4.4 GB over on every attempt. If a
+# resume ever lands at the wrong offset the sha256 check below fails the build,
+# so correctness does not rest on the range request being honoured.
+#
+# --speed-limit/--speed-time turn a stalled-but-open connection into an error
+# after 60s, which --retry-all-errors then retries; otherwise it could hang
+# until the builder times out.
 RUN mkdir -p /opt/models/hy-mt2 \
-    && curl -fL --retry 5 --retry-delay 5 --retry-connrefused \
+    && curl -fL --retry 8 --retry-delay 5 --retry-all-errors --retry-max-time 1800 \
+        --continue-at - --speed-limit 1048576 --speed-time 60 \
         -o "${HY_MT2_MODEL_PATH}" \
         "https://huggingface.co/${HY_MT2_REPO}/resolve/${HY_MT2_REVISION}/${HY_MT2_FILE}" \
     && echo "${HY_MT2_SHA256}  ${HY_MT2_MODEL_PATH}" | sha256sum -c - \
