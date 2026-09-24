@@ -747,9 +747,90 @@ def _install_render_patches() -> None:
         except Exception as exc:  # pragma: no cover
             log.warning("flat fill not installed (%s)", exc)
 
+    # --- 5. a Turkish hyphenator, since upstream never has one --------------
+    try:
+        from langcodes import standardize_tag  # noqa: PLC0415
+        from manga_translator.rendering import text_render  # noqa: PLC0415
+
+        _orig_select_hyphenator = text_render.select_hyphenator
+
+        def select_hyphenator(language: str):
+            hyph = _orig_select_hyphenator(language)
+            if hyph is not None:
+                return hyph  # a real dictionary showed up - prefer it
+            try:
+                if standardize_tag(language).startswith(("tr", "trk")):
+                    return _turkish_hyphenator
+            except Exception:
+                pass
+            return None
+
+        text_render.select_hyphenator = select_hyphenator
+    except Exception as exc:  # pragma: no cover
+        log.warning("Turkish hyphenator not installed (%s)", exc)
+
     _RENDER_PATCHED = True
     log.info("render patches installed (overlap resolution, dark-bubble outline "
              "at mean<=%s)", DARK_BUBBLE_MAX)
+
+
+# --------------------------------------------------------------------------- #
+# Turkish hyphenation
+# --------------------------------------------------------------------------- #
+# calc_horizontal() (upstream's line-wrapper) asks select_hyphenator(language)
+# for an object with .syllables(word); when that returns None, any word over
+# 3 letters is split with list(word) - one "syllable" per LETTER - so the
+# packer can cut a word at any letter boundary to make it fit a line. That is
+# where a wrap like "rahatl / ayacaksın" comes from: no syllable boundary
+# said no.
+#
+# For Turkish, select_hyphenator() always returns None. Two compounding bugs,
+# not one:
+#   1. standardize_tag("TRK") -> "trk" (ISO 639-2/T), and the lookup only
+#      matches language CODES that start with "trk" - "tr_TR" does not.
+#   2. Even fixing that, PyHyphen's own dictionary catalogue only lists which
+#      dictionaries COULD be fetched; nothing in this build ever downloads
+#      one, in keeping with baking everything at build time rather than
+#      reaching the network at runtime. Hyphenator("tr_TR") raises OSError:
+#      the .dic/.aff files are not on disk.
+#
+# Turkish orthography is phonetic and every syllable holds exactly one vowel,
+# so real syllable boundaries follow the consonant run between two vowels:
+#   0 consonants (V.V)   -> split between them          sa-at
+#   1 consonant  (VCV)   -> it joins the FOLLOWING vowel a-ra-ba
+#   2 consonants (VCCV)  -> split between them            kar-deş
+#   3 consonants (VCCCV) -> first stays, other two follow (rare in Turkish)
+# Leading/trailing consonants stay with the first/last syllable.
+#
+# Checked against the real renderer with a mid-word-forced wrap: this turns
+# "homur/danıyo/rsun" into "homur/danı/yorsun" and "rahatl/ayacaksın" into
+# "rahat/layacak/sın" - real syllable boundaries either way. Every case was
+# also checked for "".join(syllables(word)) == word, so a bad boundary can at
+# worst look slightly off; it can never drop or duplicate a letter.
+_TURKISH_VOWELS = set("aeıioöuüAEIİIOÖUÜ")
+
+
+def _turkish_syllables(word: str) -> List[str]:
+    positions = [i for i, ch in enumerate(word) if ch in _TURKISH_VOWELS]
+    if len(positions) <= 1:
+        return [word]
+    bounds = [0]
+    for a, b in zip(positions, positions[1:]):
+        gap = b - a - 1  # consonants strictly between these two vowels
+        cut = a + 1 if gap <= 1 else a + 2
+        bounds.append(cut)
+    bounds.append(len(word))
+    return [word[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1)]
+
+
+class _TurkishHyphenator:
+    """Matches the one method calc_horizontal() actually calls."""
+
+    def syllables(self, word: str) -> List[str]:
+        return _turkish_syllables(word)
+
+
+_turkish_hyphenator = _TurkishHyphenator()
 
 
 def _flat_fill(image, mask, np, cv2):

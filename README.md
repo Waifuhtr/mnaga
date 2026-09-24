@@ -524,6 +524,54 @@ birebir piksel PNG'nin yarısı boyutunda alınır.
 
 ---
 
+## Kelimelerin rastgele yerden bölünmesi
+
+Satırı saracak upstream fonksiyonu (`calc_horizontal`), sığmayan bir kelimeyi
+heceleyiciden gelen hece sınırlarına göre bölüyor. Heceleyici yoksa şuna
+düşüyor:
+
+```python
+if len(new_syls) == 0:
+    if len(word) <= 3: new_syls = [word]
+    else: new_syls = list(word)     # her HARF ayrı "hece"
+```
+
+Yani kelime harf harf parçalanıyor ve satır doldurucu bunları herhangi bir
+harf sınırından kesebiliyor. `rahatl / ayacaksın` gibi kırılmaların kaynağı
+tam olarak bu.
+
+**Türkçe için heceleyici hiçbir zaman bulunmuyordu**, iki ayrı sebepten:
+
+1. `standardize_tag("TRK")` → `"trk"` (ISO 639-2/T) döndürüyor, ama arama
+   sadece `"trk"` ile **başlayan** kodları eşleştiriyor — `"tr_TR"` bu
+   sözlükte listede olsa bile eşleşmiyor.
+2. Bu düzeltilse bile: PyHyphen'ın dil listesi sadece **indirilebilecek**
+   sözlükleri gösteriyor, kurulu olanları değil. Bu build hiçbir zaman ağdan
+   indirme yapmıyor (build-time'da her şeyi gömme ilkesi gereği), yani
+   `Hyphenator("tr_TR")` çağrısı `OSError` fırlatıyor — dosyalar diskte yok.
+
+Türkçe yazım fonetik ve her hecede tam bir sesli harf var, bu yüzden kural
+tabanlı bir heceleyici yazıp diskten/ağdan bağımsız, saf Python olarak
+kuruldu: iki sesli harf arasındaki ünsüz sayısına göre bölünüyor (0 ünsüz:
+aradan böl — `sa-at`; 1 ünsüz: sonraki heceye — `a-ra-ba`; 2 ünsüz: aradan
+böl — `kar-deş`).
+
+Gerçek renderer'la, kelimeyi zorla ortadan bölecek dar bir kutuda ölçüldü:
+
+| kelime | şimdiye kadar | düzeltme |
+|---|---|---|
+| homurdanıyorsun | `homur / danıyo / rsun` | `homur / danı / yorsun` |
+| rahatlayacaksın | `rahatl / ayacaksın` | `rahat / layacak / sın` |
+
+Her kelime ayrıca `"".join(syllables(kelime)) == kelime` ile doğrulandı — bir
+hece sınırı yanlış olsa bile bu **karakter kaybına asla yol açamaz**, en
+kötü ihtimalle sınır bir harf kayar.
+
+Gerçek bir sözlük bir gün bakılırsa (`select_hyphenator` önce onu dener)
+otomatik olarak ona geçilir; Türkçe dışındaki diller hiç etkilenmiyor.
+
+---
+
 ## Düz baloncuklar boyanıyor, inpainting'e gitmiyor
 
 Konuşma baloncuğu düz kâğıt. Onu bir modele yeniden kurdurmak, cevabın zaten
