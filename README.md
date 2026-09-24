@@ -496,6 +496,39 @@ birebir piksel PNG'nin yarısı boyutunda alınır.
 
 ---
 
+## Baloncuk arkasında kalan silme izleri
+
+`complete_mask()` maskeyi bağlı bileşenlerden kuruyor ve şunları **atıyor**:
+alanı 9 pikselden küçük olanları, hiçbir metin satırıyla yeterince örtüşmeyen
+veya ona yeterince yakın olmayanları. Üstelik `dispatch()` maskeyi önce
+**0.5x'e kadar küçültülmüş** bir kopyada hesaplıyor, ince tırnaklar orada
+kayboluyor. Atılan her şey, inpainter'ın varlığından haberdar olmadığı
+mürekkep olarak sayfada kalıyor.
+
+Gerçek `mask_refinement.dispatch`'i çalıştırıp ölçtüm. Dedektör çıktısına
+benzeyen (aşınmış, bir satırı eksik) bir maskeyle:
+
+| ayar | kalan mürekkep | balon dışına taşma |
+|---|---|---|
+| upstream, dilation 20 / kernel 3 | %20.60 | 22 992 px |
+| dilation 30 / kernel 5 | %18.86 | 31 564 px |
+| dilation 40 / kernel 7 | %17.51 | 36 820 px |
+| **+ bölge taraması** | **%1.58** | **22 992 px** |
+
+Yani `mask_dilation_offset`'i büyütmek **yanlış kaldıraç**: kalıntıyı ancak
+%20.6'dan %17.5'e indiriyor ama taşmayı 23 binden 37 bin piksele çıkarıyor —
+metni temizlemekten hızlı biçimde çizimi yemeye başlıyor.
+
+Bunun yerine her tespit edilen bloğun **kendi kutusu** taranıyor ve yerel arka
+plandan `MASK_SWEEP_DELTA`'dan fazla sapan her piksel mürekkep sayılıyor.
+Kutuyla sınırlı olduğu için başka yerdeki çizime uzanamıyor; küçültülmüş
+geçişte kaybolan ince tırnakları da yakalıyor.
+
+Upstream zaten doğru maskelediğinde tarama hiçbir şey değiştirmiyor (ideal
+maskeyle kalıntı %0, taşma 0 — tarama öncesi ve sonrası aynı).
+
+---
+
 ## Toplu yükleme ve sayfa sırası
 
 * **Tek görsel**, **çoklu görsel** ve **ZIP** yüklenebilir; hepsi aynı anda olabilir.
