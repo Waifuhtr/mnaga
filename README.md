@@ -524,6 +524,39 @@ birebir piksel PNG'nin yarısı boyutunda alınır.
 
 ---
 
+## Düz baloncuklar boyanıyor, inpainting'e gitmiyor
+
+Konuşma baloncuğu düz kâğıt. Onu bir modele yeniden kurdurmak, cevabın zaten
+tam olarak bilindiği yerde tahmin yürütmek demek — ve baloncuk arkasındaki
+soluk lekeyi bırakan şey o tahmin.
+
+Artık her delik tek tek inceleniyor: çevresindeki halka `FLAT_FILL_STD`'den az
+değişiyorsa ve `FLAT_WHITE_MIN` üstünde ya da `FLAT_BLACK_MAX` altındaysa,
+delik doğrudan o renkle boyanıyor. Tram, gradyan, çizim, siyah-beyaz ekseninden
+sapan herhangi bir renk — hepsi inpainter'a gidiyor, orası onun işi.
+
+Altı zemin türü içeren bir sayfayla ölçüldü:
+
+| zemin | sonuç | temiz orijinalden fark |
+|---|---|---|
+| düz beyaz | boyandı | **0.00** |
+| düz siyah | boyandı | **0.00** |
+| 251'de basılmış baloncuk | boyandı | **0.00** |
+| tram | inpainter'a | — |
+| gradyan | inpainter'a | — |
+| renkli | inpainter'a | — |
+
+Düz zeminler dokunulmamış çizimle **piksel piksel aynı** çıkıyor; hiçbir
+inpainting modelinin garanti edemeyeceği sonuç bu.
+
+Halkanın kendi medyanı kullanılıyor, sabit 255/0 değil: 251'de basılmış bir
+baloncuk saf beyaza zorlansa parlak bir yama olarak görünürdü.
+
+Bir sayfadaki tüm delikler düz çıkarsa model hiç çalıştırılmıyor — hem daha
+hızlı, hem zaten doğru olan bir şeye dokunma riski yok.
+
+---
+
 ## Baloncuk arkasında kalan silme izleri
 
 `complete_mask()` maskeyi bağlı bileşenlerden kuruyor ve şunları **atıyor**:

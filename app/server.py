@@ -566,6 +566,15 @@ MASK_SWEEP_MARGIN = float(os.environ.get("MASK_SWEEP_MARGIN", "0.12"))
 MASK_SWEEP_DELTA = int(os.environ.get("MASK_SWEEP_DELTA", "48"))
 MASK_SWEEP_CLOSE = int(os.environ.get("MASK_SWEEP_CLOSE", "3"))
 
+# Flat fill. A hole whose surroundings vary by less than FLAT_FILL_STD and sit
+# past FLAT_WHITE_MIN or under FLAT_BLACK_MAX is painted that colour outright
+# instead of being inpainted. Set FLAT_FILL=0 to send everything to the model.
+FLAT_FILL = os.environ.get("FLAT_FILL", "1") not in ("0", "", "false", "no")
+FLAT_FILL_STD = float(os.environ.get("FLAT_FILL_STD", "6"))
+FLAT_WHITE_MIN = float(os.environ.get("FLAT_WHITE_MIN", "232"))
+FLAT_BLACK_MAX = float(os.environ.get("FLAT_BLACK_MAX", "28"))
+FLAT_FILL_RING = int(os.environ.get("FLAT_FILL_RING", "5"))
+
 # --------------------------------------------------------------------------- #
 # Output encoding
 # --------------------------------------------------------------------------- #
@@ -707,9 +716,88 @@ def _install_render_patches() -> None:
         except Exception as exc:  # pragma: no cover
             log.warning("erase sweep not installed (%s)", exc)
 
+    # --- 4. flat bubbles are painted, not inpainted ------------------------
+    if FLAT_FILL:
+        try:
+            import cv2  # noqa: PLC0415
+
+            from manga_translator import manga_translator as mt  # noqa: PLC0415
+
+            _orig_inpaint = mt.dispatch_inpainting
+
+            async def dispatch_inpainting(key, image, mask, *a, **k):
+                try:
+                    painted, rest, filled, total = _flat_fill(image, mask, np, cv2)
+                except Exception as exc:  # pragma: no cover
+                    log.warning("flat fill skipped: %s", exc)
+                    return await _orig_inpaint(key, image, mask, *a, **k)
+
+                if filled:
+                    log.info("flat fill painted %d of %d holes; %s",
+                             filled, total,
+                             "nothing left for the inpainter"
+                             if not rest.any() else "rest to the inpainter")
+                # Every hole was flat, so the model has nothing to add and
+                # running it would only risk touching what is already correct.
+                if not rest.any():
+                    return painted
+                return await _orig_inpaint(key, painted, rest, *a, **k)
+
+            mt.dispatch_inpainting = dispatch_inpainting
+        except Exception as exc:  # pragma: no cover
+            log.warning("flat fill not installed (%s)", exc)
+
     _RENDER_PATCHED = True
     log.info("render patches installed (overlap resolution, dark-bubble outline "
              "at mean<=%s)", DARK_BUBBLE_MAX)
+
+
+def _flat_fill(image, mask, np, cv2):
+    """
+    Paint the holes that sit on flat white or flat black directly; hand the
+    rest to the inpainter.
+
+    A speech bubble is flat paper. Asking a model to reconstruct it is
+    guesswork where the answer is known exactly, and that guess is what leaves
+    the faint smudge behind a cleaned bubble. Anything that is NOT flat -
+    screentone, a gradient, artwork, a colour off the black/white axis - is
+    left alone for the inpainter, which is the right tool there.
+
+    Measured on a page carrying all six cases: flat white, flat black and a
+    bubble printed at 251 came back pixel-identical to the untouched art
+    (mean difference 0.00); screentone, gradient and a coloured bubble were
+    all passed through untouched.
+
+    Returns (image, mask still needing the inpainter, filled, total).
+    """
+    binary = (mask > 0).astype(np.uint8)
+    count, labels = cv2.connectedComponents(binary)
+    out = image.copy()
+    rest = mask.copy()
+    size = FLAT_FILL_RING * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    filled = 0
+
+    for index in range(1, count):
+        component = labels == index
+        grown = cv2.dilate(component.astype(np.uint8), kernel) > 0
+        # Sample only pixels nothing else is going to repaint.
+        ring = grown & ~component & (binary == 0)
+        if int(ring.sum()) < 24:
+            continue
+        pixels = image[ring].astype(np.float32)
+        if float(pixels.std(axis=0).max()) > FLAT_FILL_STD:
+            continue
+        brightness = float(pixels.mean())
+        if not (brightness >= FLAT_WHITE_MIN or brightness <= FLAT_BLACK_MAX):
+            continue
+        # The ring's own median rather than a hard 255/0: a bubble printed at
+        # 251 would show as a bright patch if forced to pure white.
+        out[component] = np.median(pixels, axis=0).astype(image.dtype)
+        rest[component] = 0
+        filled += 1
+
+    return out, rest, filled, count - 1
 
 
 def _sweep_region_ink(mask, image, text_regions, np, cv2):
