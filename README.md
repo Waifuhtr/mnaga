@@ -159,9 +159,18 @@ karşılaştırma yapmak için yeniden derleme gerekmez:
 * **Metin algılayıcı** — `DBNet` (varsayılan) veya `Paddle`. Paddle, upstream'in
   Rust PP-OCR ailesi algılayıcısıdır; `rusty-manga-image-translator` zaten bir
   gereklilik olduğu için image'a **ek yük getirmez** (ayrı model indirmesi yok).
-  Ancak gerçek bir sayfa üzerinde **doğrulanmadı** — geliştirme ortamının TLS
-  araya giren proxy'si Rust HTTP istemcisi tarafından reddedildiği için
-  çalıştırılamadı. Bu yüzden seçenek olarak sunuluyor, varsayılan yapılmadı.
+
+  **Artık gerçek sayfa üzerinde ölçüldü.** Aynı 1280×1816 sayfada, aynı build'de:
+
+  | Algılayıcı | Bölge | Küçük "Her ass" baloncuğu | Yerleşim |
+  |---|---|---|---|
+  | DBNet | 12-13 | **kaçırıyor** | düzgün |
+  | Paddle | **16** | **yakalıyor** | bölgeler dar, yazı küçülür |
+
+  Paddle daha çok metin buluyor ama bölgeleri daha dar çıkarıyor, bu yüzden
+  yazı boyutu tabana dayanıp okunaksızlaşabiliyor. Çözümü aşağıdaki **en küçük
+  yazı boyutu** ayarı. Varsayılan hâlâ DBNet, çünkü Paddle'ın yerleşim bedeli
+  sayfaya göre değişiyor.
 * **Algılama hassasiyeti** — DBNet'in `text_threshold` / `box_threshold`
   değerleri. Varsayılanımız `0.4 / 0.6`, upstream'in kendi varsayılanı
   `0.5 / 0.7`.
@@ -263,6 +272,46 @@ sorunu sadece yer değiştirir. Onun yerine arayüze seçenek olarak kondu, böy
 | Çok güçlü (deneysel) | 36 / 7 |
 
 Hangisinin kullanıldığı iş durumunda `erase: "28/5"` olarak geri raporlanıyor.
+
+---
+
+## Yazı çok küçük çıkıyorsa
+
+Upstream her bölge için yazı boyutunu o bölgenin geometrisinden hesaplıyor,
+sonra `font_size_minimum` ile tabanlıyor. Taban `-1` iken otomatik:
+`(en + boy) / 200` — 1280×1816 bir sayfada **~15px**. Dar bir bölge bu tabana
+dayandığında metin okunaksız hâle geliyor, kelimeler ortadan bölünüyor.
+
+Bölgenin dar olup olmaması **algılayıcıya** bağlı: Paddle aynı sayfada 16,
+DBNet 13 bölge çıkarıyor; Paddle'ınkiler daha dar olduğu için tabana çok daha
+sık dayanıyorlar. Paddle kullanıyorsan "En küçük yazı boyutu" ayarını
+**26px**'e almak bunu düzeltir.
+
+| Ayar | Ne yapar |
+|---|---|
+| Otomatik (varsayılan) | upstream'in `(en+boy)/200` değeri, ~15px |
+| En az 20 / 26 / 32 px | sabit taban; 26px Paddle için başlangıç noktası |
+
+---
+
+## Tarayıcı cache'i (önemli)
+
+`/static/*` dosyalarını `StaticFiles` ETag/Last-Modified ile sunuyor, yani
+tarayıcı `app.js`'i rebuild'ler arasında **saklıyor**. `index.html` ise kendi
+route'umuzdan, validator'sız geldiği için hep taze. Bu ikisi bir araya gelince
+**yeni sayfa + eski script** çalışıyordu:
+
+* font seçici "Yükleniyor…" yer tutucusunda takılı kalıyordu — cache'teki eski
+  script onu dolduran kodu içermiyordu;
+* seçici ölü olduğu için algılayıcı da seçilemiyordu, dolayısıyla o sekmede
+  Paddle denenemiyordu.
+
+Sonuç: aynı Space'in iki sekmesi bir test turu boyunca farklı davrandı.
+
+Artık `index.html` sunulurken asset URL'lerine build commit'i ekleniyor
+(`/static/app.js?v=135a1d4`) ve sayfanın kendisi `Cache-Control: no-store` ile
+gidiyor. Rebuild olduğunda URL değişiyor, tarayıcı zorunlu olarak yeniden
+indiriyor. Elle `Ctrl+F5` gerekmiyor.
 
 ---
 

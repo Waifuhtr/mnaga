@@ -220,6 +220,7 @@ async function start() {
   fd.append('detection_size', $('detection_size').value);
   fd.append('inpainting_size', $('inpainting_size').value);
   fd.append('font_size_offset', $('font_size_offset').value);
+  fd.append('font_size_minimum', $('font_size_minimum').value);
   fd.append('debug', $('debug').checked ? 'true' : 'false');
 
   try {

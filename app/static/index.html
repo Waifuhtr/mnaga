@@ -61,8 +61,8 @@
       </label>
       <label>Metin algılayıcı
         <select id="detector">
-          <option value="default" selected>DBNet (varsayılan)</option>
-          <option value="paddle">Paddle (PP-OCR — denenmedi)</option>
+          <option value="default" selected>DBNet (varsayılan, düzgün yerleşim)</option>
+          <option value="paddle">Paddle (daha çok metin yakalar, yazı küçülür)</option>
         </select>
       </label>
       <label>Algılama hassasiyeti
@@ -97,6 +97,14 @@
           <option value="768">768 (en düşük VRAM)</option>
           <option value="1024" selected>1024 (önerilen)</option>
           <option value="1536">1536 (kaliteli, çok VRAM ister)</option>
+        </select>
+      </label>
+      <label>En küçük yazı boyutu
+        <select id="font_size_minimum">
+          <option value="-1" selected>Otomatik (varsayılan)</option>
+          <option value="20">En az 20px</option>
+          <option value="26">En az 26px (Paddle için önerilir)</option>
+          <option value="32">En az 32px</option>
         </select>
       </label>
       <label>Yazı boyutu

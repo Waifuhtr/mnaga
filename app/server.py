@@ -82,6 +82,31 @@ def _read_build_info() -> Dict[str, Any]:
 
 
 BUILD_INFO = _read_build_info()
+
+
+def _asset_version() -> str:
+    """
+    Cache-busting token for /static assets.
+
+    StaticFiles serves ETag/Last-Modified, so browsers hold on to app.js and
+    style.css across rebuilds while index.html - served by our own route, with
+    no validators - always comes back fresh. That combination shipped a NEW
+    page driven by an OLD script: the font picker sat on its "Yükleniyor…"
+    placeholder forever because the cached script had no code to fill it, and
+    with the picker dead the detector could not be chosen either. Two tabs of
+    the same Space behaved differently for a whole test round because of it.
+
+    Tying the asset URLs to the build makes a rebuild invalidate them.
+    """
+    if BUILD_INFO.get("commit"):
+        return BUILD_INFO["commit"]
+    # No build info (local run): fall back to the newest static file's mtime.
+    try:
+        return str(max(int(f.stat().st_mtime) for f in STATIC_DIR.glob("*") if f.is_file()))
+    except (ValueError, OSError):
+        return "dev"
+
+
 log.info("build: commit=%s committed_at=%s %s",
          BUILD_INFO["commit"] or "<unknown>",
          BUILD_INFO["committed_at"] or "<unknown>",
@@ -270,6 +295,24 @@ DEFAULT_BOX_THRESHOLD = float(os.environ.get("DETECT_BOX_THRESHOLD", "0.6"))
 # so kernel_size has to be assigned onto the translator per job, like the font.
 DEFAULT_MASK_DILATION = int(os.environ.get("ERASE_MASK_DILATION", "20"))
 DEFAULT_ERASE_KERNEL = int(os.environ.get("ERASE_KERNEL_SIZE", "3"))
+
+# --------------------------------------------------------------------------- #
+# Rendered text size
+# --------------------------------------------------------------------------- #
+# Upstream picks a font size per region from that region's own geometry, then
+# floors it at font_size_minimum. At -1 that floor is auto: (height+width)/200,
+# which on a 1280x1816 page is about 15px - small enough that a cramped region
+# renders as unreadable mush with words broken mid-way.
+#
+# Whether a region IS cramped depends on the detector. Measured on the same
+# page: DBNet produced 13 regions, paddle 16. Paddle finds more text (it is the
+# one that catches the small "Her ass" bubble DBNet drops) but its regions are
+# tighter, so more of them hit the floor. Raising the floor is what makes
+# paddle's output readable.
+#
+# -1 keeps upstream's auto behaviour and stays the default; the UI offers
+# explicit floors so the two detectors can be compared fairly.
+DEFAULT_FONT_SIZE_MIN = int(os.environ.get("RENDER_FONT_SIZE_MIN", "-1"))
 
 # Inpainting is by far the most VRAM-hungry stage, and it scales with the
 # square of the working resolution. Measured on a T4 (15 GiB, ~5.5 GiB of it
@@ -534,6 +577,11 @@ def build_config(options: Dict[str, Any], inpainting_size: Optional[int] = None)
     render.rtl = False
     if options.get("font_size_offset"):
         render.font_size_offset = int(options["font_size_offset"])
+    # -1 means "upstream decides"; anything else is an explicit pixel floor.
+    font_min = options.get("font_size_minimum", DEFAULT_FONT_SIZE_MIN)
+    render.font_size_minimum = (
+        -1 if int(font_min) < 0 else _clamp_int(font_min, DEFAULT_FONT_SIZE_MIN, 8, 80)
+    )
 
     translator_cfg = TranslatorConfig(
         translator=Translator.custom_openai,
@@ -657,9 +705,10 @@ async def run_job(job: Job) -> None:
             kernel = _odd(job.options.get("erase_kernel_size"), DEFAULT_ERASE_KERNEL, 1, 15)
             translator.kernel_size = kernel
 
-            log.info("job %s: font=%s detector=%s erase=%s/%s", job.id,
+            log.info("job %s: font=%s detector=%s erase=%s/%s font_min=%s", job.id,
                      font.name if font else "<none>", job.options.get("detector"),
-                     job.options.get("mask_dilation_offset"), kernel)
+                     job.options.get("mask_dilation_offset"), kernel,
+                     job.options.get("font_size_minimum"))
 
             hook_state = {"stage": ""}
 
@@ -745,7 +794,13 @@ async def index() -> HTMLResponse:
     page = STATIC_DIR / "index.html"
     if not page.exists():
         return HTMLResponse("<h1>UI dosyası bulunamadı</h1>", status_code=500)
-    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    version = _asset_version()
+    html = page.read_text(encoding="utf-8")
+    for asset in ("app.js", "style.css"):
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={version}")
+    # The page carries the asset URLs, so it must never itself be a stale copy.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 async def llama_status() -> Dict[str, Any]:
@@ -824,6 +879,7 @@ async def create_job(
     mask_dilation_offset: int = Form(DEFAULT_MASK_DILATION),
     erase_kernel_size: int = Form(DEFAULT_ERASE_KERNEL),
     font_size_offset: int = Form(0),
+    font_size_minimum: int = Form(DEFAULT_FONT_SIZE_MIN),
     debug: bool = Form(False),
 ) -> JSONResponse:
     if MIT_IMPORT_ERROR:
@@ -857,6 +913,7 @@ async def create_job(
         "mask_dilation_offset": mask_dilation_offset,
         "erase_kernel_size": erase_kernel_size,
         "font_size_offset": font_size_offset,
+        "font_size_minimum": font_size_minimum,
     }
     job.in_dir.mkdir(parents=True, exist_ok=True)
 
