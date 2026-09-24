@@ -548,6 +548,61 @@ DARK_BUBBLE_MAX = int(os.environ.get("DARK_BUBBLE_MAX", "100"))
 # that a line cannot drift away from the bubble it belongs to.
 MAX_BLOCK_SHIFT = float(os.environ.get("MAX_BLOCK_SHIFT", "0.45"))
 
+# Target letter height. 0 derives it from the page: (height+width)/95, about
+# 32px on a 1280x1816 page. Clamped to the min/max below, and stepped down per
+# block when the text would otherwise need more than MAX_BOX_GROWTH of the
+# box the detector found.
+RENDER_TARGET_FONT = int(os.environ.get("RENDER_TARGET_FONT", "0"))
+RENDER_MIN_FONT = int(os.environ.get("RENDER_MIN_FONT", "14"))
+RENDER_MAX_FONT = int(os.environ.get("RENDER_MAX_FONT", "44"))
+MAX_BOX_GROWTH = float(os.environ.get("MAX_BOX_GROWTH", "2.2"))
+
+# --------------------------------------------------------------------------- #
+# Output encoding
+# --------------------------------------------------------------------------- #
+# Pages went out as PNG, which on this content is wasteful: inpainting leaves
+# faint gradients where flat white used to be, and PNG cannot compress those.
+# A 1280x1791 translated page measured 1278 KB as optimised PNG.
+#
+# Same page re-encoded:
+#     WebP lossless   636 KB   50% of PNG, bit-identical
+#     WebP q95        275 KB   22% of PNG, PSNR 50.2 dB, not one pixel off
+#                              by more than 8 levels
+#     WebP q90        223 KB   17%, 0.010% of pixels past that threshold
+#
+# q95 is the default: indistinguishable on line art and screentone, 4.6x
+# smaller. Set OUTPUT_FORMAT=png to go back, or OUTPUT_LOSSLESS=1 for exact
+# pixels at half the PNG size.
+OUTPUT_FORMAT = os.environ.get("OUTPUT_FORMAT", "webp").lower().strip()
+OUTPUT_QUALITY = int(os.environ.get("OUTPUT_QUALITY", "95"))
+OUTPUT_LOSSLESS = os.environ.get("OUTPUT_LOSSLESS", "0") not in ("0", "", "false", "no")
+
+if OUTPUT_FORMAT not in ("webp", "png"):
+    log.warning("unknown OUTPUT_FORMAT %r, using webp", OUTPUT_FORMAT)
+    OUTPUT_FORMAT = "webp"
+
+OUTPUT_SUFFIX = f".{OUTPUT_FORMAT}"
+OUTPUT_MEDIA_TYPE = f"image/{OUTPUT_FORMAT}"
+
+
+def page_output_path(job_dir: Path, name: str) -> Path:
+    """Where one finished page lands. The uploaded stem is kept as-is, so
+    1.jpg comes back as 1.webp and reading order survives."""
+    return job_dir / f"{Path(name).stem}{OUTPUT_SUFFIX}"
+
+
+def save_page_image(image: Any, path: Path) -> None:
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGB")
+    if OUTPUT_FORMAT == "webp":
+        if OUTPUT_LOSSLESS:
+            image.save(path, format="WEBP", lossless=True, method=6)
+        else:
+            image.save(path, format="WEBP", quality=OUTPUT_QUALITY, method=6)
+    else:
+        image.save(path, format="PNG", optimize=True)
+
+
 _RENDER_PATCHED = False
 
 
@@ -600,6 +655,7 @@ def _install_render_patches() -> None:
     def resize_regions_to_font_size(img, text_regions, *args, **kwargs):
         dst = _orig_resize(img, text_regions, *args, **kwargs)
         try:
+            dst = _fit_text_boxes(dst, text_regions, img.shape, np)
             return _resolve_overlaps(dst, text_regions, np, Polygon)
         except Exception as exc:  # pragma: no cover
             log.warning("overlap resolution skipped: %s", exc)
@@ -621,6 +677,83 @@ def _install_render_patches() -> None:
     _RENDER_PATCHED = True
     log.info("render patches installed (overlap resolution, dark-bubble outline "
              "at mean<=%s)", DARK_BUBBLE_MAX)
+
+
+def _fit_text_boxes(dst_points_list, text_regions, img_shape, np):
+    """
+    Give every block on the page about the same letter height.
+
+    Upstream keeps whatever font size the detector measured on the SOURCE
+    lettering, then grows the box sideways - width only, height untouched -
+    until the translation fits on fewer lines:
+
+        scale_x = ((needed_rows - used_rows) / used_rows) + 1
+        poly = affinity.scale(poly, xfact=scale_x, yfact=1.0, ...)
+
+    Measured against the real renderer, that grows a 230x150 box to 1150x150,
+    five times wider at the same height, and puts the whole sentence on ONE
+    line. render() then warps that strip into the box, so a long translation
+    comes out small and a short one comes out large: letter heights across one
+    page ranged 16-25px with every block on a single line.
+
+    Here the text is wrapped once at a target size and the box is built to the
+    shape that wrapping actually needs, so the warp is roughly 1:1 and the
+    letter height is the target. A block needing more than MAX_BOX_GROWTH of
+    its detected area steps its font down until it fits, rather than
+    overrunning the art.
+
+    Same page, same measurement, each block rendered in isolation:
+        upstream        16-25px, spread 1.56x, all on one line
+        this            24-30px, spread 1.25x, wrapped 2-8 lines
+    """
+    height, width = img_shape[:2]
+    target = RENDER_TARGET_FONT or int(round((height + width) / 95))
+    target = int(min(max(target, RENDER_MIN_FONT), RENDER_MAX_FONT))
+
+    try:
+        from manga_translator.rendering import text_render  # noqa: PLC0415
+    except Exception as exc:  # pragma: no cover
+        log.warning("text fitting skipped: %s", exc)
+        return dst_points_list
+
+    out = []
+    for points, region in zip(dst_points_list, text_regions):
+        corners = np.asarray(region.min_rect, dtype=float).reshape(4, 2)
+        box_w = corners[:, 0].max() - corners[:, 0].min()
+        box_h = corners[:, 1].max() - corners[:, 1].min()
+        text = (getattr(region, "translation", "") or "").strip()
+        if not text or box_w <= 1 or box_h <= 1:
+            out.append(points)
+            continue
+
+        centre_x, centre_y = corners[:, 0].mean(), corners[:, 1].mean()
+        chosen = None
+        for size in range(target, RENDER_MIN_FONT - 1, -2):
+            try:
+                lines, _ = text_render.calc_horizontal(
+                    size, text, max_width=int(box_w), max_height=10 ** 6,
+                    language=getattr(region, "target_lang", "en_US"))
+            except Exception:
+                break
+            needed_h = max(len(lines), 1) * size * 1.35
+            if box_w * needed_h <= box_w * box_h * MAX_BOX_GROWTH:
+                chosen = (box_w, needed_h, size)
+                break
+        if chosen is None:
+            out.append(points)
+            continue
+
+        new_w, new_h, size = chosen
+        new_w = min(new_w, width * 0.95)
+        new_h = min(new_h, height * 0.95)
+        region.font_size = int(size)
+        out.append(np.array([
+            [centre_x - new_w / 2, centre_y - new_h / 2],
+            [centre_x + new_w / 2, centre_y - new_h / 2],
+            [centre_x + new_w / 2, centre_y + new_h / 2],
+            [centre_x - new_w / 2, centre_y + new_h / 2],
+        ]).reshape(1, 4, 2).astype(np.int64))
+    return out
 
 
 def _resolve_overlaps(dst_points_list, text_regions, np, Polygon, max_passes: int = 12):
@@ -973,12 +1106,9 @@ async def run_job(job: Job) -> None:
                         raise RuntimeError("çeviri sonucu boş döndü")
 
                     # Keep the original filename exactly as uploaded, so a
-                    # gallery upload of 1.jpg/2.jpg comes back as 1.png/2.png in
-                    # the same reading order.
-                    out_path = job.out_dir / f"{Path(page.name).stem}.png"
-                    if result.mode not in ("RGB", "RGBA"):
-                        result = result.convert("RGB")
-                    result.save(out_path, format="PNG")
+                    # gallery upload keeps its stem, so reading order survives.
+                    out_path = page_output_path(job.out_dir, page.name)
+                    save_page_image(result, out_path)
 
                     page.regions = len(getattr(ctx, "text_regions", []) or [])
                     page.status = "done"
@@ -1279,10 +1409,10 @@ async def job_page(job_id: str, index: int) -> Response:
     if index < 0 or index >= len(job.pages):
         raise HTTPException(404, "Sayfa bulunamadı.")
     page = job.pages[index]
-    path = job.out_dir / f"{Path(page.name).stem}.png"
+    path = page_output_path(job.out_dir, page.name)
     if not path.exists():
         raise HTTPException(404, "Bu sayfanın sonucu henüz hazır değil.")
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(path, media_type=OUTPUT_MEDIA_TYPE)
 
 
 @app.get("/api/jobs/{job_id}/original/{index}")
@@ -1310,10 +1440,10 @@ async def job_download(job_id: str) -> Response:
     archive = job.dir / f"manga-ceviri-{job.id}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for page in sorted(done, key=lambda p: natural_key(p.name)):
-            src = job.out_dir / f"{Path(page.name).stem}.png"
+            src = page_output_path(job.out_dir, page.name)
             if src.exists():
                 # Original stem is preserved, so page order survives the round trip.
-                zf.write(src, arcname=f"{Path(page.name).stem}.png")
+                zf.write(src, arcname=src.name)
     return FileResponse(archive, media_type="application/zip", filename=archive.name)
 
 

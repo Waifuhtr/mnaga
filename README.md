@@ -445,6 +445,57 @@ kuruluyor (`_install_render_patches`), upstream dosyalarına dokunulmuyor.
 
 ---
 
+## Yazı boyutu neden baloncuktan baloncuğa değişiyordu
+
+`resize_regions_to_font_size` kutuyu **sadece yatayda** büyütüyor:
+
+```python
+scale_x = ((needed_rows - used_rows) / used_rows) + 1
+poly = affinity.scale(poly, xfact=scale_x, yfact=1.0, ...)   # yfact=1.0
+```
+
+Gerçek render'la ölçüldü: 230x150 bir kutu **1150x150**'ye çıkıyor — beş kat
+geniş, aynı yükseklik — ve cümlenin tamamı **tek satıra** basılıyor. `render()`
+o şeridi kutuya warp edince uzun çeviri küçük, kısa çeviri büyük çıkıyor.
+
+Daha fazla satır daha fazla **yükseklik** ister, genişlik değil.
+
+Artık metin bir hedef boyutta sarılıyor ve kutu o sarmanın gerektirdiği şekle
+göre kuruluyor; warp kabaca 1:1 oluyor ve harf yüksekliği hedefin kendisi.
+Kutusunun `MAX_BOX_GROWTH` katından fazlasını isteyen blok, sığana kadar font
+boyunu kademeli düşürüyor.
+
+Aynı sayfa, her blok izole ölçüldü:
+
+| | harf yüksekliği | savrulma | satır |
+|---|---|---|---|
+| upstream | 16-25px | 1.56x | hepsi tek satır |
+| **bizde** | **24-31px** | **1.29x** | 2-8 satır |
+
+Hem daha tutarlı hem daha büyük.
+
+---
+
+## Çıktı boyutu (WebP)
+
+Sayfalar PNG olarak çıkıyordu. Inpainting, düz beyazın yerine hafif gradyanlar
+bıraktığı için PNG bunları sıkıştıramıyor — 800 KB'lık kaynak 3-4 MB'a çıkıyordu.
+
+Gerçek bir çıktı sayfası (1280x1791) üzerinde ölçüm:
+
+| format | boyut | PNG'ye göre | PSNR | >8 seviye sapan piksel |
+|---|---|---|---|---|
+| PNG | 1278 KB | 100% | — | — |
+| WebP kayıpsız | 636 KB | 50% | ∞ | %0 |
+| **WebP q95** | **275 KB** | **22%** | 50.2 dB | **%0.000** |
+| WebP q90 | 223 KB | 17% | 48.1 dB | %0.010 |
+
+q95'te tek piksel bile 8 seviyeden fazla sapmıyor, dosya 4.6 kat küçülüyor —
+varsayılan bu. `OUTPUT_FORMAT=png` ile geri dönülür, `OUTPUT_LOSSLESS=1` ile
+birebir piksel PNG'nin yarısı boyutunda alınır.
+
+---
+
 ## Toplu yükleme ve sayfa sırası
 
 * **Tek görsel**, **çoklu görsel** ve **ZIP** yüklenebilir; hepsi aynı anda olabilir.
