@@ -65,19 +65,27 @@ function addFiles(list) {
 
 function renderFileList() {
   const box = $('file-list');
-  if (!selected.length) {
-    box.hidden = true;
-    $('start').disabled = true;
-    return;
+  box.hidden = !selected.length;
+  if (selected.length) {
+    box.innerHTML = selected.map((f, i) => `
+      <div class="file-row">
+        <span class="idx">${i + 1}</span>
+        <span class="nm">${escapeHtml(f.name)}</span>
+        <span class="sz">${humanSize(f.size)}</span>
+      </div>`).join('');
   }
-  box.hidden = false;
-  box.innerHTML = selected.map((f, i) => `
-    <div class="file-row">
-      <span class="idx">${i + 1}</span>
-      <span class="nm">${escapeHtml(f.name)}</span>
-      <span class="sz">${humanSize(f.size)}</span>
-    </div>`).join('');
-  $('start').disabled = false;
+  updateStartButton();
+}
+
+// The page is served while llama-server is still loading its model, so having
+// files picked is not on its own enough to start. The server refuses such a
+// job anyway; this just says so before the click rather than after.
+function updateStartButton() {
+  const btn = $('start');
+  btn.disabled = !selected.length || !backendReady;
+  btn.textContent = !backendReady && selected.length
+    ? 'Çeviri modeli yükleniyor…'
+    : 'Çeviriyi başlat';
 }
 
 function escapeHtml(s) {
@@ -138,23 +146,48 @@ function showFontNote() {
 // --------------------------------------------------------------------------
 // Health
 // --------------------------------------------------------------------------
+let backendReady = false;
+
 async function checkHealth() {
   const el = $('health');
   try {
     const r = await fetch('/health');
     const d = await r.json();
-    if (d.status === 'ok') {
+    backendReady = d.status === 'ok';
+
+    if (backendReady) {
       el.className = 'health ok';
       el.textContent = d.gpu ? 'Hazır · GPU etkin' : 'Hazır · CPU modu (yavaş)';
+    } else if (!d.llama_server?.reachable) {
+      // Expected for the first minutes of a cold start, not a failure.
+      el.className = 'health checking';
+      el.textContent = 'Çeviri modeli yükleniyor… (ilk açılışta birkaç dakika sürer)';
     } else {
       el.className = 'health bad';
-      const why = !d.llama_server?.reachable ? 'çeviri modeli yüklenmedi' : d.manga_image_translator;
-      el.textContent = 'Hazır değil: ' + why;
+      el.textContent = 'Hazır değil: ' + d.manga_image_translator;
     }
+    showBuild(d.build);
   } catch (e) {
+    backendReady = false;
     el.className = 'health bad';
     el.textContent = 'Sunucuya ulaşılamıyor';
   }
+  updateStartButton();
+  // Poll hard while waiting for the backend, then back off.
+  clearTimeout(healthTimer);
+  healthTimer = setTimeout(checkHealth, backendReady ? 30000 : 5000);
+}
+
+let healthTimer = null;
+
+// Which commit this Space was built from. Without it, "am I even running the
+// code I just pushed?" costs a debugging session to answer.
+function showBuild(build) {
+  const el = $('build');
+  if (!build?.commit) { el.textContent = ''; return; }
+  const when = build.committed_at ? new Date(build.committed_at).toLocaleString('tr-TR') : '';
+  el.textContent = `sürüm ${build.commit}${when ? ' · ' + when : ''}`;
+  el.title = build.subject || '';
 }
 
 // --------------------------------------------------------------------------
@@ -180,6 +213,10 @@ async function start() {
   fd.append('text_threshold', textTh);
   fd.append('box_threshold', boxTh);
   fd.append('inpainter', $('inpainter').value);
+  // One control, two upstream knobs - see app/server.py.
+  const [dilation, kernel] = $('erase').value.split(',');
+  fd.append('mask_dilation_offset', dilation);
+  fd.append('erase_kernel_size', kernel);
   fd.append('detection_size', $('detection_size').value);
   fd.append('inpainting_size', $('inpainting_size').value);
   fd.append('font_size_offset', $('font_size_offset').value);
@@ -195,7 +232,7 @@ async function start() {
     poller = setInterval(poll, 1500);
   } catch (e) {
     showError('Çeviri başlatılamadı: ' + e.message);
-    $('start').disabled = false;
+    updateStartButton();
     $('progress-wrap').hidden = true;
   }
 }
@@ -331,5 +368,4 @@ drop.addEventListener('drop', (e) => {
 });
 
 loadFonts();
-checkHealth();
-setInterval(checkHealth, 30000);
+checkHealth();   // reschedules itself; interval depends on readiness

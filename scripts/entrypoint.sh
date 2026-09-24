@@ -33,7 +33,13 @@ PY
 )"
 export LD_LIBRARY_PATH="/opt/llama${NV_LIBS:+:${NV_LIBS}}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-log() { echo "[entrypoint] $*"; }
+# Every line carries wall-clock UTC and seconds since this script started, so a
+# cold start can be measured from the Space log instead of guessed at. The
+# Python side already timestamps its own lines, and these two line up.
+START_SECONDS=${SECONDS}
+log() {
+    printf '[entrypoint] %s (+%ss) %s\n' "$(date -u +%H:%M:%S)" "$(( SECONDS - START_SECONDS ))" "$*"
+}
 
 log "================= startup ================="
 log "model      : ${MODEL_PATH}"
@@ -118,22 +124,51 @@ log "==========================================="
     > /tmp/llama-server.log 2>&1 &
 LLAMA_PID=$!
 
+# ---------------------------------------------------------------------------
+# Start the web app NOW, in parallel with llama-server's model load.
+#
+# These two do not depend on each other while loading: llama-server is reading
+# a 4.4 GB GGUF off disk and copying it into VRAM, while the web app is mostly
+# importing torch and manga-image-translator. Running them back to back cost
+# the sum of both; running them together costs roughly the longer of the two.
+#
+# The app serves immediately, but refuses to start a translation until
+# llama-server answers /health - app/server.py checks that on every job, and
+# the UI's status chip shows the same thing. So nothing can silently run
+# without a translation backend.
+# ---------------------------------------------------------------------------
+log "starting web app on 0.0.0.0:${APP_PORT} (in parallel with model load)"
+python -m uvicorn app.server:app \
+    --host 0.0.0.0 \
+    --port "${APP_PORT}" \
+    --app-dir /app \
+    --timeout-keep-alive 120 &
+APP_PID=$!
+
 cleanup() {
-    log "shutting down (llama pid ${LLAMA_PID})"
-    kill "${LLAMA_PID}" 2>/dev/null || true
+    log "shutting down (llama pid ${LLAMA_PID}, app pid ${APP_PID})"
+    kill "${LLAMA_PID}" "${APP_PID}" 2>/dev/null || true
     wait "${LLAMA_PID}" 2>/dev/null || true
+    wait "${APP_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------------------
-# Wait for llama-server to finish loading before accepting traffic.
+# Wait for llama-server to finish loading. The app is already up at this point;
+# this loop exists to report the load time and to fail the container loudly if
+# the model never arrives.
 # ---------------------------------------------------------------------------
 log "waiting for llama-server on ${LLAMA_HOST}:${LLAMA_PORT} ..."
 DEADLINE=$(( SECONDS + ${LLAMA_STARTUP_TIMEOUT:-600} ))
+LLAMA_WAIT_START=${SECONDS}
 until curl -fsS "http://${LLAMA_HOST}:${LLAMA_PORT}/health" >/dev/null 2>&1; do
     if ! kill -0 "${LLAMA_PID}" 2>/dev/null; then
         log "FATAL: llama-server exited during startup. Last 40 log lines:"
         tail -40 /tmp/llama-server.log || true
+        exit 1
+    fi
+    if ! kill -0 "${APP_PID}" 2>/dev/null; then
+        log "FATAL: web app exited during startup."
         exit 1
     fi
     if (( SECONDS > DEADLINE )); then
@@ -143,7 +178,7 @@ until curl -fsS "http://${LLAMA_HOST}:${LLAMA_PORT}/health" >/dev/null 2>&1; do
     fi
     sleep 2
 done
-log "llama-server is healthy"
+log "llama-server is healthy (model load took $(( SECONDS - LLAMA_WAIT_START ))s)"
 
 # Report whether CUDA was actually engaged, so a T4 runtime can be verified
 # from the Space logs alone.
@@ -152,9 +187,16 @@ if grep -qiE 'CUDA[0-9]*|offloading .* layers to GPU' /tmp/llama-server.log; the
         | head -8 | sed 's/^/[llama] /' || true
 fi
 
-log "starting web app on 0.0.0.0:${APP_PORT}"
-exec python -m uvicorn app.server:app \
-    --host 0.0.0.0 \
-    --port "${APP_PORT}" \
-    --app-dir /app \
-    --timeout-keep-alive 120
+log "READY - both processes up"
+
+# Neither process is expected to exit. Whichever does, take the container down
+# with it so the Space restarts rather than sitting there half-working.
+STATUS=0
+wait -n "${LLAMA_PID}" "${APP_PID}" || STATUS=$?
+if kill -0 "${LLAMA_PID}" 2>/dev/null; then
+    log "FATAL: web app exited (status ${STATUS})"
+else
+    log "FATAL: llama-server exited (status ${STATUS}). Last 40 log lines:"
+    tail -40 /tmp/llama-server.log || true
+fi
+exit "${STATUS}"

@@ -112,7 +112,7 @@ gereksiz yere iki katına çıkardı.
 |---|---|
 | `space/Dockerfile` | **Asıl build dosyası.** Space'e aynen kopyalanır. Kök dizindeki `Dockerfile` buna bir symlink'tir (iki kopya arasında fark oluşmasın diye). |
 | `space/README.md` | Space için gerekli YAML metadata (`sdk: docker`, `app_port: 7860`). |
-| `scripts/entrypoint.sh` | llama-server'ı başlatır, GPU'yu algılar, sağlıklı olmasını bekler, sonra web uygulamasını açar. |
+| `scripts/entrypoint.sh` | llama-server ile web uygulamasını **paralel** başlatır, GPU'yu algılar, her satırı zaman damgalar, biri ölürse konteyneri indirir. |
 | `app/server.py` | FastAPI uygulaması: yükleme, iş kuyruğu, ilerleme, sonuç ve ZIP indirme. M.I.T.'yi doğrudan kütüphane olarak çağırır. |
 | `app/static/` | Arayüz (HTML + CSS + JS). Framework yok. |
 | `assets/fonts/` | **Font bırakma klasörü.** Buraya konan her font arayüzdeki listede otomatik çıkar. Bkz. `assets/fonts/README.md`. |
@@ -178,6 +178,91 @@ boru hattından düşüyor ve İngilizce metin sayfada **silinmemiş** kalıyord
 kullanıcı testinde görülen kaçak buydu. 0.4/0.6'da kutu ifadenin tamamını
 kapsıyor ve sayfadaki toplam bölge sayısı 57 → 58 kadar oynuyor, yani daha
 gevşek eşik sayfayı sahte kutularla doldurmuyor.
+
+---
+
+## Hangi sürüm çalışıyor?
+
+Arayüzün üst kısmında, durum göstergesinin hemen altında `sürüm 9443a29 · 24.09.2026`
+gibi bir satır var. Bu, **image'ın hangi commit'ten derlendiğini** söyler.
+
+Nereden geliyor: Dockerfile katman cache'ini kırmak için zaten
+`ADD https://api.github.com/repos/.../commits/<branch> /tmp/app-commit.json`
+yapıyor. Klon sonrası `.git` siliniyor (image küçük kalsın diye), dolayısıyla
+konteyner içinde hangi commit'in çekildiğini söyleyen **tek kayıt** bu dosya.
+Uygulama onu geri okuyup `/health` içinde ve arayüzde gösteriyor.
+
+Bu, "Space gerçekten son push'umu mu çalıştırıyor?" sorusunu tek bakışta
+cevaplar. Bir kez, bir haftalık eski build'in üzerinde hata aranarak
+öğrenilmişti; bir daha gerekmesin diye kalıcı hale getirildi.
+
+`/health` çıktısında da aynısı var:
+
+```json
+"build": { "commit": "9443a29", "committed_at": "2026-09-24T07:09:11Z", "subject": "..." }
+```
+
+---
+
+## Başlangıç süresi
+
+Konteyner açılışında iki ağır iş var ve artık **paralel** çalışıyorlar:
+
+| | Ne yapar | Kim bekler |
+|---|---|---|
+| `llama-server` | 4.4 GB GGUF'u diskten okur, T4'e offload eder | çeviri isteği |
+| `uvicorn` + app | torch ve manga-image-translator'ı import eder | — |
+
+Eskiden `entrypoint.sh` llama-server `/health` yeşile dönene kadar bekleyip
+**ondan sonra** uvicorn'u başlatıyordu, yani süreler toplanıyordu. Artık ikisi
+birlikte başlıyor; toplam süre kabaca ikisinin **büyüğü** kadar.
+
+Bunun bedeli: arayüz, çeviri motoru hazır olmadan erişilebilir oluyor. O yüzden
+`/api/jobs` her işte llama-server'ı kontrol edip hazır değilse işi **başlatmadan**
+reddediyor (503), arayüzdeki buton da o sırada "Çeviri modeli yükleniyor…"
+yazıp pasif kalıyor. Yani yarım işlenmiş sayfa üretmesi mümkün değil.
+
+Ölçüm için `entrypoint.sh`'ın her satırı artık zaman damgalı:
+
+```
+[entrypoint] 08:01:02 (+0s) starting web app on 0.0.0.0:7860 (in parallel with model load)
+[entrypoint] 08:01:02 (+0s) waiting for llama-server on 127.0.0.1:8081 ...
+[entrypoint] 08:04:11 (+189s) llama-server is healthy (model load took 189s)
+[entrypoint] 08:04:11 (+189s) READY - both processes up
+```
+
+`(+Ns)` script başından beri geçen saniye. Böylece bir sonraki açılışta hangi
+adımın ne kadar sürdüğü tahmin değil, ölçüm olur.
+
+---
+
+## Metin silme gücü (leke sorunu)
+
+Silinen baloncukların kenarında iz kalıyorsa sebep büyük ihtimalle silme
+maskesinin harflerin yeterince ötesine genişlememesi. İki parametre kontrol
+ediyor ve upstream bunları **iki ayrı yerden** okuyor:
+
+| Parametre | Upstream nereden okur | Bizde nereden gider |
+|---|---|---|
+| `mask_dilation_offset` | `config.mask_dilation_offset` | `build_config()` |
+| `kernel_size` | `self.kernel_size` (constructor'da set edilir) | `run_job()`'ta örneğe atanır |
+
+İkincisi upstream'de bilinen bir tuhaflık — kodda kendi `#todo: fix why is
+kernel size loaded in the constructor` notu duruyor. Bu yüzden font gibi, her
+iş için translator örneğine yazılıyor.
+
+**Varsayılanları değiştirmedim** (20 / 3, upstream'in kendi değerleri): elimde
+başka bir değerin daha iyi olduğunu söyleyen bir ölçüm yok, tahminle değiştirmek
+sorunu sadece yer değiştirir. Onun yerine arayüze seçenek olarak kondu, böylece
+üç ayarı **tek build üzerinde** karşılaştırabilirsin:
+
+| Seçenek | dilation / kernel |
+|---|---|
+| Normal (varsayılan) | 20 / 3 |
+| Güçlü (leke kalıyorsa) | 28 / 5 |
+| Çok güçlü (deneysel) | 36 / 7 |
+
+Hangisinin kullanıldığı iş durumunda `erase: "28/5"` olarak geri raporlanıyor.
 
 ---
 

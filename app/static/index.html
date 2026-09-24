@@ -11,6 +11,7 @@
   <h1>Manga Çeviri</h1>
   <p class="sub">Japonca / İngilizce manga sayfalarını Türkçeye çevirir · <span class="tag">Hy-MT2-7B</span></p>
   <div id="health" class="health checking">Sistem kontrol ediliyor…</div>
+  <p id="build" class="hint build"></p>
 </header>
 
 <main>
@@ -82,6 +83,13 @@
           <option value="1536">1536 (hızlı)</option>
           <option value="2048" selected>2048 (dengeli)</option>
           <option value="2560">2560 (hassas)</option>
+        </select>
+      </label>
+      <label>Metin silme gücü
+        <select id="erase">
+          <option value="20,3" selected>Normal (varsayılan)</option>
+          <option value="28,5">Güçlü (leke kalıyorsa)</option>
+          <option value="36,7">Çok güçlü (deneysel)</option>
         </select>
       </label>
       <label>Metin silme çözünürlüğü

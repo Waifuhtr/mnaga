@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -48,6 +49,43 @@ REPO_DIR = APP_DIR.parent
 MIT_ROOT = Path(os.environ.get("MIT_ROOT", "/opt/manga-image-translator"))
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/data/work"))
 GPT_CONFIG = Path(os.environ.get("GPT_CONFIG_PATH", REPO_DIR / "config" / "gpt_config.yaml"))
+
+# --------------------------------------------------------------------------- #
+# Build provenance
+# --------------------------------------------------------------------------- #
+# The Dockerfile pulls https://api.github.com/repos/.../commits/<branch> into
+# this file to bust the layer cache when the branch moves. It is also the only
+# record inside the container of WHICH commit was cloned, since the clone's
+# .git directory is deleted to keep the image small.
+#
+# Reading it back turns "is the Space actually running my latest push?" into a
+# glance at /health instead of a diagnostic session. A whole round of debugging
+# went into a build that predated the code being looked for, which is exactly
+# what this prevents.
+BUILD_INFO_PATH = Path(os.environ.get("BUILD_INFO_PATH", "/tmp/app-commit.json"))
+
+
+def _read_build_info() -> Dict[str, Any]:
+    try:
+        data = json.loads(BUILD_INFO_PATH.read_text())
+        commit = data.get("commit") or {}
+        message = (commit.get("message") or "").splitlines()
+        return {
+            "commit": (data.get("sha") or "")[:7] or None,
+            "committed_at": (commit.get("author") or {}).get("date"),
+            "subject": message[0][:120] if message else None,
+        }
+    except Exception as exc:
+        # Not fatal: an image built some other way just reports nothing.
+        log.warning("build info unavailable (%s): %s", BUILD_INFO_PATH, exc)
+        return {"commit": None, "committed_at": None, "subject": None}
+
+
+BUILD_INFO = _read_build_info()
+log.info("build: commit=%s committed_at=%s %s",
+         BUILD_INFO["commit"] or "<unknown>",
+         BUILD_INFO["committed_at"] or "<unknown>",
+         BUILD_INFO["subject"] or "")
 
 LLAMA_HOST = os.environ.get("LLAMA_HOST", "127.0.0.1")
 LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "8081"))
@@ -213,6 +251,26 @@ DEFAULT_DETECTOR = os.environ.get("DETECTOR", "default")   # "default" | "paddle
 DEFAULT_TEXT_THRESHOLD = float(os.environ.get("DETECT_TEXT_THRESHOLD", "0.4"))
 DEFAULT_BOX_THRESHOLD = float(os.environ.get("DETECT_BOX_THRESHOLD", "0.6"))
 
+# --------------------------------------------------------------------------- #
+# Text erasure (the "stain" left behind after inpainting)
+# --------------------------------------------------------------------------- #
+# How far the erase mask is grown past the detected glyphs before inpainting
+# runs. Undersized masks leave a rim of the original ink behind, which reads as
+# a smudge around an otherwise cleaned bubble; oversized ones start eating the
+# bubble outline and the art around it.
+#
+# Both values are upstream's own defaults and are NOT changed here - there is
+# no measurement yet saying a different number is better, and guessing at one
+# would just move the problem. They are exposed per job instead, so the whole
+# range can be compared on one build rather than one value per rebuild.
+#
+# The two are read from different places upstream (manga_translator.py):
+#   mask_dilation_offset -> config.mask_dilation_offset, per call
+#   kernel_size          -> self.kernel_size, set on the instance in __init__
+# so kernel_size has to be assigned onto the translator per job, like the font.
+DEFAULT_MASK_DILATION = int(os.environ.get("ERASE_MASK_DILATION", "20"))
+DEFAULT_ERASE_KERNEL = int(os.environ.get("ERASE_KERNEL_SIZE", "3"))
+
 # Inpainting is by far the most VRAM-hungry stage, and it scales with the
 # square of the working resolution. Measured on a T4 (15 GiB, ~5.5 GiB of it
 # already held by llama.cpp): lama_large at 1280x1816 tried to allocate
@@ -356,6 +414,8 @@ class Job:
             # actually used, rather than what was requested.
             "font": self.options.get("font_resolved") or self.options.get("font"),
             "detector": self.options.get("detector"),
+            "erase": "%s/%s" % (self.options.get("mask_dilation_offset"),
+                                self.options.get("erase_kernel_size")),
             "pages": [
                 {
                     "index": i,
@@ -426,6 +486,31 @@ async def get_translator() -> "MangaTranslator":
         return _translator
 
 
+def _odd(value: Any, default: int, low: int, high: int) -> int:
+    """
+    Clamp to [low, high] and force odd.
+
+    cv2.getStructuringElement takes even sizes but grows the mask asymmetrically
+    for them, which would shift the erased area by half a pixel per dilation
+    instead of widening it evenly.
+    """
+    try:
+        n = min(high, max(low, int(value)))
+    except (TypeError, ValueError):
+        return default
+    if n % 2 == 0:
+        # Step up to the next odd, or down if that would leave the range.
+        n = n - 1 if n + 1 > high else n + 1
+    return max(n, 1)
+
+
+def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        return min(high, max(low, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _threshold(value: Any, default: float) -> float:
     """
     A detection threshold is a probability; anything outside (0, 1) silently
@@ -477,7 +562,12 @@ def build_config(options: Dict[str, Any], inpainting_size: Optional[int] = None)
             inpainting_precision=InpaintPrecision.fp16,
         ),
         render=render,
-        kernel_size=3,
+        # Upstream reads the mask dilation from the config...
+        mask_dilation_offset=_clamp_int(
+            options.get("mask_dilation_offset"), DEFAULT_MASK_DILATION, 0, 80),
+        # ...but NOT the kernel size, which it takes from the instance. Set here
+        # anyway so the two never disagree if upstream fixes that.
+        kernel_size=_odd(options.get("erase_kernel_size"), DEFAULT_ERASE_KERNEL, 1, 15),
     )
 
 
@@ -560,8 +650,16 @@ async def run_job(job: Job) -> None:
             if font:
                 translator.font_path = str(font)
             job.options["font_resolved"] = font.name if font else None
-            log.info("job %s: font=%s detector=%s", job.id,
-                     font.name if font else "<none>", job.options.get("detector"))
+
+            # Mask refinement reads self.kernel_size, not the config
+            # (manga_translator.py: _run_mask_refinement), so the per-job value
+            # has to be assigned here the same way the font is.
+            kernel = _odd(job.options.get("erase_kernel_size"), DEFAULT_ERASE_KERNEL, 1, 15)
+            translator.kernel_size = kernel
+
+            log.info("job %s: font=%s detector=%s erase=%s/%s", job.id,
+                     font.name if font else "<none>", job.options.get("detector"),
+                     job.options.get("mask_dilation_offset"), kernel)
 
             hook_state = {"stage": ""}
 
@@ -650,19 +748,30 @@ async def index() -> HTMLResponse:
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
-@app.get("/health")
-async def health() -> JSONResponse:
-    """Liveness probe: reports the app, the model file and the llama backend."""
+async def llama_status() -> Dict[str, Any]:
+    """
+    Is the translation backend up yet?
+
+    The web app now starts in parallel with llama-server's model load
+    (scripts/entrypoint.sh), so for the first minutes of a cold start the UI is
+    reachable while the backend is not. Everything that needs the backend asks
+    here rather than assuming it is there.
+    """
     import httpx
 
-    model_path = Path(os.environ.get("HY_MT2_MODEL_PATH", "/opt/models/hy-mt2/Hy-MT2-7B-Q4_K_M.gguf"))
-    llama: Dict[str, Any] = {"reachable": False}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"http://{LLAMA_HOST}:{LLAMA_PORT}/health")
-            llama = {"reachable": resp.status_code == 200, "status_code": resp.status_code}
+            return {"reachable": resp.status_code == 200, "status_code": resp.status_code}
     except Exception as exc:
-        llama = {"reachable": False, "error": str(exc)}
+        return {"reachable": False, "error": str(exc)}
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    """Liveness probe: reports the app, the model file and the llama backend."""
+    model_path = Path(os.environ.get("HY_MT2_MODEL_PATH", "/opt/models/hy-mt2/Hy-MT2-7B-Q4_K_M.gguf"))
+    llama = await llama_status()
 
     body = {
         "status": "ok" if (llama.get("reachable") and not MIT_IMPORT_ERROR) else "degraded",
@@ -671,6 +780,8 @@ async def health() -> JSONResponse:
         "llama_server": llama,
         "gpu": _using_gpu(),
         "jobs": len(JOBS),
+        # Which commit this image was built from - see BUILD_INFO above.
+        "build": BUILD_INFO,
     }
     return JSONResponse(body, status_code=200 if body["status"] == "ok" else 503)
 
@@ -710,6 +821,8 @@ async def create_job(
     inpainting_size: int = Form(DEFAULT_INPAINT_SIZE),
     text_threshold: float = Form(DEFAULT_TEXT_THRESHOLD),
     box_threshold: float = Form(DEFAULT_BOX_THRESHOLD),
+    mask_dilation_offset: int = Form(DEFAULT_MASK_DILATION),
+    erase_kernel_size: int = Form(DEFAULT_ERASE_KERNEL),
     font_size_offset: int = Form(0),
     debug: bool = Form(False),
 ) -> JSONResponse:
@@ -717,6 +830,17 @@ async def create_job(
         raise HTTPException(500, f"Çeviri motoru yüklenemedi: {MIT_IMPORT_ERROR}")
     if not files:
         raise HTTPException(400, "Hiç dosya yüklenmedi.")
+
+    # The UI is up before llama-server finishes loading its model, so a job
+    # submitted in that window would fail deep inside the pipeline with a
+    # connection error on a half-processed page. Refuse it up front instead.
+    llama = await llama_status()
+    if not llama.get("reachable"):
+        raise HTTPException(
+            503,
+            "Çeviri modeli hâlâ yükleniyor. Sayfanın üstündeki durum "
+            "göstergesi yeşile döndüğünde tekrar deneyin.",
+        )
 
     job = Job(id=uuid.uuid4().hex[:12])
     job.debug = debug
@@ -730,6 +854,8 @@ async def create_job(
         "inpainting_size": inpainting_size,
         "text_threshold": text_threshold,
         "box_threshold": box_threshold,
+        "mask_dilation_offset": mask_dilation_offset,
+        "erase_kernel_size": erase_kernel_size,
         "font_size_offset": font_size_offset,
     }
     job.in_dir.mkdir(parents=True, exist_ok=True)

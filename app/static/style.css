@@ -48,6 +48,9 @@ header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.02em; }
 .health.checking { color: var(--muted); }
 .health.ok { color: var(--ok); border-color: #1d3b25; background: #10231600; }
 .health.bad { color: var(--err); border-color: #4a1f1f; }
+/* Which commit the running image was built from. Deliberately quiet - it only
+   matters when something looks stale, and then it is the first thing to check. */
+.build { margin: 8px 0 0; font-size: 12px; opacity: 0.75; }
 
 main {
   max-width: 900px;
