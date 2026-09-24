@@ -97,6 +97,45 @@ function showError(msg) {
 function clearError() { $('error').hidden = true; }
 
 // --------------------------------------------------------------------------
+// Fonts
+// --------------------------------------------------------------------------
+// The list is whatever the server found in assets/fonts/ - nothing is hardcoded
+// here, so adding a font to the repo is enough to make it selectable.
+let fontInfo = {};
+
+async function loadFonts() {
+  const sel = $('font');
+  try {
+    const r = await fetch('/api/fonts');
+    const d = await r.json();
+    if (!d.fonts?.length) throw new Error('yazı tipi bulunamadı');
+
+    fontInfo = Object.fromEntries(d.fonts.map((f) => [f.key, f]));
+    sel.innerHTML = d.fonts.map((f) =>
+      `<option value="${escapeHtml(f.key)}"${f.key === d.default ? ' selected' : ''}>` +
+      `${escapeHtml(f.label)}</option>`
+    ).join('');
+    sel.value = d.default || d.fonts[0].key;
+  } catch (e) {
+    sel.innerHTML = '<option value="">(varsayılan)</option>';
+  }
+  showFontNote();
+}
+
+function showFontNote() {
+  const f = fontInfo[$('font').value];
+  const note = $('font-note');
+  if (!f) { note.textContent = ''; return; }
+  if (f.turkish === 'partial') {
+    note.textContent = `⚠ ${f.missing_glyphs} harfleri bu yazı tipinde yok, yedekten gelir.`;
+  } else if (f.turkish === 'full') {
+    note.textContent = 'Türkçe harflerin tamamı var.';
+  } else {
+    note.textContent = '';
+  }
+}
+
+// --------------------------------------------------------------------------
 // Health
 // --------------------------------------------------------------------------
 async function checkHealth() {
@@ -133,7 +172,13 @@ async function start() {
   const fd = new FormData();
   for (const f of selected) fd.append('files', f, f.name);
   fd.append('target_lang', $('target_lang').value);
+  fd.append('font', $('font').value);
   fd.append('ocr', $('ocr').value);
+  fd.append('detector', $('detector').value);
+  // One control drives both thresholds; they are only ever tuned together.
+  const [textTh, boxTh] = $('sensitivity').value.split(',');
+  fd.append('text_threshold', textTh);
+  fd.append('box_threshold', boxTh);
   fd.append('inpainter', $('inpainter').value);
   fd.append('detection_size', $('detection_size').value);
   fd.append('inpainting_size', $('inpainting_size').value);
@@ -270,6 +315,8 @@ $('debug-refresh').addEventListener('click', async () => {
   }
 });
 
+$('font').addEventListener('change', showFontNote);
+
 $('debug').addEventListener('change', (e) => {
   $('debug-card').hidden = !e.target.checked;
 });
@@ -283,5 +330,6 @@ drop.addEventListener('drop', (e) => {
   if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
 });
 
+loadFonts();
 checkHealth();
 setInterval(checkHealth, 30000);

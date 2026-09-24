@@ -52,11 +52,166 @@ GPT_CONFIG = Path(os.environ.get("GPT_CONFIG_PATH", REPO_DIR / "config" / "gpt_c
 LLAMA_HOST = os.environ.get("LLAMA_HOST", "127.0.0.1")
 LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "8081"))
 
-# anime_ace*.ttf, upstream's default manga fonts, have no glyphs for the Turkish
-# letters g-breve, dotless i, dotted I or s-cedilla; Turkish text rendered with
-# them comes out visibly broken. "comic shanns 2" keeps the comic look and does
-# cover them. Verified with fontTools against the actual font files.
-DEFAULT_FONT = os.environ.get("RENDER_FONT", "comic shanns 2.ttf")
+# --------------------------------------------------------------------------- #
+# Fonts
+# --------------------------------------------------------------------------- #
+# assets/fonts/ in this repo is the drop-in folder: every font file in it shows
+# up in the UI's font picker. Adding a font is a commit, not a code change -
+# nothing here lists font names, they are discovered by scanning the folder.
+# The folder rides into the image with the plain `git clone` of this repo
+# (Dockerfile stage 9), so no Dockerfile change is needed either.
+#
+# One font renders the whole page. Upstream calls text_render.set_font() once
+# per page, so a per-region font (dialogue vs SFX) would need a different
+# mechanism than this - deliberately out of scope here.
+FONT_DIR_LOCAL = REPO_DIR / "assets" / "fonts"
+FONT_DIR_UPSTREAM = MIT_ROOT / "fonts"
+FONT_EXTENSIONS = (".ttf", ".otf", ".ttc", ".otc")
+
+# Upstream's fonts/ also holds Arial-Unicode / msyh / msgothic, which are the
+# fallback faces text_render reaches for when a glyph is missing - they are not
+# lettering faces, so they are not offered as a choice. These three are.
+UPSTREAM_FONTS = ("comic shanns 2.ttf", "anime_ace.ttf", "anime_ace_3.ttf")
+
+# Always present (bundled upstream) and has full Turkish coverage, so it is a
+# safe last resort when a requested font is gone.
+FALLBACK_FONT_FILE = "comic shanns 2.ttf"
+
+# Picked by filename stem, so it keeps working if the file is replaced by a
+# patched version, and can be overridden per deployment.
+DEFAULT_FONT_KEY = os.environ.get("RENDER_FONT_KEY", "ccwildwords")
+
+# The letters Turkish needs beyond ASCII. A face missing some of these still
+# renders - text_render falls through to FALLBACK_FONTS (Arial-Unicode first),
+# so nothing comes out as tofu, those particular letters just arrive in another
+# face, which reads as a style mismatch mid-word. The UI says which fonts do
+# that instead of leaving it to be discovered on a finished page.
+TURKISH_GLYPHS = "çÇğĞıİöÖşŞüÜ"
+
+_font_cache: Dict[str, Any] = {"sig": None, "fonts": {}}
+
+
+def font_key(path: Path) -> str:
+    """Stable, URL-safe id for a font file, derived from its name."""
+    key = re.sub(r"[^a-z0-9]+", "_", path.stem.lower()).strip("_")
+    return key or "font"
+
+
+def _missing_turkish_glyphs(path: Path) -> Optional[str]:
+    """
+    Which Turkish letters this face lacks, or None if it could not be checked.
+
+    freetype-py is what upstream renders with, so it is always installed
+    alongside us; the guard is only so a font the library chokes on degrades to
+    "unknown coverage" instead of taking the whole font list down.
+    """
+    try:
+        import freetype  # noqa: PLC0415 - optional at import time, present at runtime
+
+        face = freetype.Face(str(path))
+        return "".join(ch for ch in TURKISH_GLYPHS if face.get_char_index(ch) == 0)
+    except Exception as exc:  # pragma: no cover - depends on the dropped-in file
+        log.warning("could not read glyph coverage of %s: %s", path.name, exc)
+        return None
+
+
+def _scan_font_dirs() -> Dict[str, Dict[str, Any]]:
+    fonts: Dict[str, Dict[str, Any]] = {}
+
+    # Ours first, so dropping in a patched "anime_ace_3.ttf" (or any upstream
+    # name) shadows upstream's copy instead of appearing twice.
+    candidates: List[Path] = []
+    if FONT_DIR_LOCAL.is_dir():
+        candidates += sorted(
+            p for p in FONT_DIR_LOCAL.iterdir()
+            if p.is_file() and p.suffix.lower() in FONT_EXTENSIONS
+        )
+    candidates += [FONT_DIR_UPSTREAM / name for name in UPSTREAM_FONTS]
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        key = font_key(path)
+        if key in fonts:
+            continue
+        missing = _missing_turkish_glyphs(path)
+        fonts[key] = {
+            "key": key,
+            "file": path.name,
+            "path": str(path),
+            # The filename is the label: whatever the user names the file is
+            # what they see in the picker.
+            "label": path.stem,
+            "source": "repo" if path.parent == FONT_DIR_LOCAL else "upstream",
+            "turkish": "unknown" if missing is None else ("full" if not missing else "partial"),
+            "missing_glyphs": missing or "",
+        }
+    return fonts
+
+
+def list_fonts() -> Dict[str, Dict[str, Any]]:
+    """
+    Every selectable font, keyed by font_key(). Re-scanned when the drop-in
+    folder changes so a font added to a running container is picked up without
+    a restart; otherwise served from cache, since the glyph check opens files.
+    """
+    try:
+        sig = (
+            FONT_DIR_LOCAL.stat().st_mtime_ns if FONT_DIR_LOCAL.is_dir() else None,
+            FONT_DIR_UPSTREAM.stat().st_mtime_ns if FONT_DIR_UPSTREAM.is_dir() else None,
+        )
+    except OSError:
+        sig = None
+
+    if _font_cache["sig"] != sig or not _font_cache["fonts"]:
+        _font_cache["fonts"] = _scan_font_dirs()
+        _font_cache["sig"] = sig
+        log.info("fonts available: %s", ", ".join(_font_cache["fonts"]) or "<none>")
+    return _font_cache["fonts"]
+
+
+def default_font_key() -> str:
+    """The configured default if it exists, else whatever is first in the list."""
+    fonts = list_fonts()
+    if DEFAULT_FONT_KEY in fonts:
+        return DEFAULT_FONT_KEY
+    fallback = font_key(Path(FALLBACK_FONT_FILE))
+    if fallback in fonts:
+        return fallback
+    return next(iter(fonts), "")
+
+
+def resolve_font(key: Optional[str]) -> Optional[Path]:
+    """
+    Map a font key from the UI to a file on disk. Never returns a path that does
+    not exist: an unknown key falls back to the default, then to any font at all.
+    """
+    fonts = list_fonts()
+    entry = fonts.get(key or "") or fonts.get(default_font_key())
+    if entry:
+        return Path(entry["path"])
+    log.error("no usable font in %s or %s", FONT_DIR_LOCAL, FONT_DIR_UPSTREAM)
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Detection
+# --------------------------------------------------------------------------- #
+# Measured on a real 1280x1816 page against the actual DBNet model: at
+# upstream's defaults (text 0.5 / box 0.7) a small two-word bubble produced a
+# box covering only the first word, which then fell out of the pipeline and
+# left the source text un-erased. At 0.4 / 0.6 the box covers the whole phrase,
+# and the page's total region count only moved 57 -> 58 - so the looser
+# threshold did not flood the page with spurious boxes.
+#
+# "paddle" selects upstream's Rust PP-OCR-family detector. It costs nothing
+# extra in the image (rusty-manga-image-translator is already a requirement),
+# but it is UNVERIFIED on a real page - it could not be exercised in the dev
+# sandbox, whose TLS-intercepting proxy the Rust HTTP client rejects. It is
+# offered as a choice, not made the default, until it has actually been run.
+DEFAULT_DETECTOR = os.environ.get("DETECTOR", "default")   # "default" | "paddle"
+DEFAULT_TEXT_THRESHOLD = float(os.environ.get("DETECT_TEXT_THRESHOLD", "0.4"))
+DEFAULT_BOX_THRESHOLD = float(os.environ.get("DETECT_BOX_THRESHOLD", "0.6"))
 
 # Inpainting is by far the most VRAM-hungry stage, and it scales with the
 # square of the working resolution. Measured on a T4 (15 GiB, ~5.5 GiB of it
@@ -197,6 +352,10 @@ class Job:
             "done": self.done_count,
             "percent": int(self.done_count * 100 / total) if total else 0,
             "debug": self.debug,
+            # Reported back so a test run can be checked against what was
+            # actually used, rather than what was requested.
+            "font": self.options.get("font_resolved") or self.options.get("font"),
+            "detector": self.options.get("detector"),
             "pages": [
                 {
                     "index": i,
@@ -247,7 +406,7 @@ async def get_translator() -> "MangaTranslator":
             raise RuntimeError(f"manga-image-translator is unavailable: {MIT_IMPORT_ERROR}")
 
         use_gpu = _using_gpu()
-        font = MIT_ROOT / "fonts" / DEFAULT_FONT
+        font = resolve_font(default_font_key())
         params = {
             # kernel_size is read with int(params.get('kernel_size')) upstream,
             # with no default, so it must always be supplied.
@@ -258,13 +417,25 @@ async def get_translator() -> "MangaTranslator":
             # into a silently un-erased page instead of an error, which is how a
             # GPU OOM ended up looking like a successful but unreadable result.
             "ignore_errors": False,
-            "font_path": str(font) if font.exists() else None,
+            "font_path": str(font) if font else None,
             "models_ttl": 0,
             "batch_size": 1,
         }
         log.info("initialising MangaTranslator (gpu=%s, font=%s)", use_gpu, params["font_path"])
         _translator = MangaTranslator(params)
         return _translator
+
+
+def _threshold(value: Any, default: float) -> float:
+    """
+    A detection threshold is a probability; anything outside (0, 1) silently
+    turns detection into all-or-nothing, so a bad form value is clamped rather
+    than passed through to produce a mysteriously empty or noisy page.
+    """
+    try:
+        return min(0.95, max(0.05, float(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def build_config(options: Dict[str, Any], inpainting_size: Optional[int] = None) -> "Config":
@@ -291,8 +462,12 @@ def build_config(options: Dict[str, Any], inpainting_size: Optional[int] = None)
         translator=translator_cfg,
         ocr=OcrConfig(ocr=ocr_choice),
         detector=DetectorConfig(
-            detector=Detector.default,
+            detector=Detector.paddle if options.get("detector") == "paddle" else Detector.default,
             detection_size=int(options.get("detection_size", 2048)),
+            # Both detectors take these through the same interface
+            # (detection/__init__.py: dispatch -> detector.detect(...)).
+            text_threshold=_threshold(options.get("text_threshold"), DEFAULT_TEXT_THRESHOLD),
+            box_threshold=_threshold(options.get("box_threshold"), DEFAULT_BOX_THRESHOLD),
         ),
         inpainter=InpainterConfig(
             inpainter=inpainter,
@@ -375,6 +550,18 @@ async def run_job(job: Job) -> None:
         job.message = "Modeller hazırlanıyor…"
         try:
             translator = await get_translator()
+
+            # Font is picked per job. MangaTranslator reads self.font_path at
+            # render time (manga_translator.py: _run_text_rendering hands it
+            # straight to dispatch_rendering), so assigning it here is enough -
+            # the translator does not need rebuilding. JOB_LOCK serialises jobs,
+            # so nothing else can be mid-render while this changes.
+            font = resolve_font(job.options.get("font"))
+            if font:
+                translator.font_path = str(font)
+            job.options["font_resolved"] = font.name if font else None
+            log.info("job %s: font=%s detector=%s", job.id,
+                     font.name if font else "<none>", job.options.get("detector"))
 
             hook_state = {"stage": ""}
 
@@ -488,14 +675,41 @@ async def health() -> JSONResponse:
     return JSONResponse(body, status_code=200 if body["status"] == "ok" else 503)
 
 
+@app.get("/api/fonts")
+async def fonts() -> JSONResponse:
+    """
+    The font picker's contents. Driven entirely by what is in assets/fonts/,
+    so the UI never needs editing when a font is added to the repo.
+    """
+    current = default_font_key()
+    return JSONResponse({
+        "default": current,
+        "fonts": [
+            {
+                "key": f["key"],
+                "label": f["label"],
+                "file": f["file"],
+                "source": f["source"],
+                "turkish": f["turkish"],
+                "missing_glyphs": f["missing_glyphs"],
+            }
+            for f in list_fonts().values()
+        ],
+    })
+
+
 @app.post("/api/jobs")
 async def create_job(
     files: List[UploadFile] = File(default=[]),
     target_lang: str = Form("TRK"),
+    font: str = Form(""),
     ocr: str = Form("48px"),
+    detector: str = Form(DEFAULT_DETECTOR),
     inpainter: str = Form("lama_large"),
     detection_size: int = Form(2048),
     inpainting_size: int = Form(DEFAULT_INPAINT_SIZE),
+    text_threshold: float = Form(DEFAULT_TEXT_THRESHOLD),
+    box_threshold: float = Form(DEFAULT_BOX_THRESHOLD),
     font_size_offset: int = Form(0),
     debug: bool = Form(False),
 ) -> JSONResponse:
@@ -508,10 +722,14 @@ async def create_job(
     job.debug = debug
     job.options = {
         "target_lang": target_lang,
+        "font": font or default_font_key(),
         "ocr": ocr,
+        "detector": detector,
         "inpainter": inpainter,
         "detection_size": detection_size,
         "inpainting_size": inpainting_size,
+        "text_threshold": text_threshold,
+        "box_threshold": box_threshold,
         "font_size_offset": font_size_offset,
     }
     job.in_dir.mkdir(parents=True, exist_ok=True)

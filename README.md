@@ -115,11 +115,69 @@ gereksiz yere iki katına çıkardı.
 | `scripts/entrypoint.sh` | llama-server'ı başlatır, GPU'yu algılar, sağlıklı olmasını bekler, sonra web uygulamasını açar. |
 | `app/server.py` | FastAPI uygulaması: yükleme, iş kuyruğu, ilerleme, sonuç ve ZIP indirme. M.I.T.'yi doğrudan kütüphane olarak çağırır. |
 | `app/static/` | Arayüz (HTML + CSS + JS). Framework yok. |
+| `assets/fonts/` | **Font bırakma klasörü.** Buraya konan her font arayüzdeki listede otomatik çıkar. Bkz. `assets/fonts/README.md`. |
 | `config/gpt_config.yaml` | Hy-MT2 için prompt ve örnekleme ayarları. M.I.T. bunu `gpt_config` olarak yükler. |
 | `.env.example` | Bütün ortam değişkenleri ve varsayılanları. |
 
 Geçici dosyalar `/tmp/mnaga-work` altında tutulur: HF Spaces'ta `/data` yalnızca
 çalışma anında (storage bucket bağlıysa) vardır ve konteyner UID 1000 ile çalışır.
+
+---
+
+## Yazı tipleri
+
+Arayüzdeki "Yazı tipi" listesi **sabit değildir**: sunucu her açılışta
+`assets/fonts/` klasörünü tarar ve orada bulduğu her `.ttf` / `.otf` / `.ttc`
+dosyasını listeye koyar. Yeni bir font eklemek için klasöre dosyayı koyup push
+etmek yeterli — kodda, Dockerfile'da veya arayüzde değişiklik gerekmez. Klasör
+image'a zaten var olan `git clone` adımıyla (Dockerfile 9. katman) girer.
+
+Listedeki ad dosya adıdır; seçilen font sayfanın tamamında kullanılır.
+Ayrıntılar ve Türkçe harf uyarısı: **`assets/fonts/README.md`**.
+
+Sunucu her fontu açıp `ç Ç ğ Ğ ı İ ö Ö ş Ş ü Ü` harflerini kontrol eder
+(`freetype`, zaten render için kullanılan kütüphane) ve eksik harf varsa bunu
+arayüzde fontun altında yazar. Eksik harf sayfayı bozmaz — `text_render` o
+harfleri yedek fontla (Arial Unicode) çizer — ama kelime ortasında stil kayması
+görünür. Şu an klasörde olanlar:
+
+| Font | Türkçe harfler |
+|---|---|
+| `CCWildWords.ttf` | tamamı var |
+| `anime_ace_3.ttf` | `ğ Ğ ı İ ş Ş` yok, yedekten gelir |
+
+Hangi fontun önceden seçili geleceği `RENDER_FONT_KEY` ile ayarlanır; tanınmayan
+bir değer verilirse uygulama var olan bir fonta düşer, fontsuz kalmaz.
+
+---
+
+## Metin algılama ayarları
+
+Arayüzde iki kontrol var, ikisi de her iş için ayrı ayrı gönderilir — yani
+karşılaştırma yapmak için yeniden derleme gerekmez:
+
+* **Metin algılayıcı** — `DBNet` (varsayılan) veya `Paddle`. Paddle, upstream'in
+  Rust PP-OCR ailesi algılayıcısıdır; `rusty-manga-image-translator` zaten bir
+  gereklilik olduğu için image'a **ek yük getirmez** (ayrı model indirmesi yok).
+  Ancak gerçek bir sayfa üzerinde **doğrulanmadı** — geliştirme ortamının TLS
+  araya giren proxy'si Rust HTTP istemcisi tarafından reddedildiği için
+  çalıştırılamadı. Bu yüzden seçenek olarak sunuluyor, varsayılan yapılmadı.
+* **Algılama hassasiyeti** — DBNet'in `text_threshold` / `box_threshold`
+  değerleri. Varsayılanımız `0.4 / 0.6`, upstream'in kendi varsayılanı
+  `0.5 / 0.7`.
+
+Varsayılanın neden değiştirildiği (ölçüm, gerçek 1280×1816 sayfa üzerinde):
+
+| Eşikler | Bulunan bölge | Küçük baloncuğun kutusu | Kapsama |
+|---|---|---|---|
+| 0.5 / 0.7 (upstream) | 57 | ilk kelimenin yarısı | %10 |
+| 0.4 / 0.6 (bizim) | 58 | ifadenin tamamı | %39 |
+
+0.5/0.7'de kutu ifadenin sadece ilk kelimesini kapsıyor, bölge sonrasında
+boru hattından düşüyor ve İngilizce metin sayfada **silinmemiş** kalıyordu —
+kullanıcı testinde görülen kaçak buydu. 0.4/0.6'da kutu ifadenin tamamını
+kapsıyor ve sayfadaki toplam bölge sayısı 57 → 58 kadar oynuyor, yani daha
+gevşek eşik sayfayı sahte kutularla doldurmuyor.
 
 ---
 

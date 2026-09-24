@@ -46,10 +46,29 @@
           <option value="KOR">Korece</option>
         </select>
       </label>
+      <label>Yazı tipi
+        <select id="font">
+          <option value="">Yükleniyor…</option>
+        </select>
+        <small id="font-note" class="hint"></small>
+      </label>
       <label>OCR modeli
         <select id="ocr">
           <option value="48px" selected>48px (hızlı, varsayılan)</option>
           <option value="mocr">manga-ocr (Japonca için daha iyi)</option>
+        </select>
+      </label>
+      <label>Metin algılayıcı
+        <select id="detector">
+          <option value="default" selected>DBNet (varsayılan)</option>
+          <option value="paddle">Paddle (PP-OCR — denenmedi)</option>
+        </select>
+      </label>
+      <label>Algılama hassasiyeti
+        <select id="sensitivity">
+          <option value="0.4,0.6" selected>Yüksek (küçük yazıları da yakalar)</option>
+          <option value="0.5,0.7">Normal (üst kaynak varsayılanı)</option>
+          <option value="0.3,0.5">Çok yüksek (deneysel)</option>
         </select>
       </label>
       <label>Metin silme
