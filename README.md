@@ -363,6 +363,70 @@ bize ait: `run_job()` her işte `text_render.get_char_glyph.cache_clear()`
 
 ---
 
+## Üst üste binen baloncuklar
+
+Çeviri kaynaktan uzun geldiğinde upstream metin kutusunu büyütüyor. Bunu
+yaparken görüntü sınırına kırpmayı **bilerek** kapatmış:
+
+```python
+# 移除边界限制，允许文本超出检测框边界
+# dst_points[..., 0] = dst_points[..., 0].clip(0, img.shape[1] - 1)
+```
+
+Komşu kutularla çakışma kontrolü ise hiç yok — upstream'in kendi `dispatch()`
+fonksiyonunda şu not duruyor:
+
+```python
+dst_points_list = resize_regions_to_font_size(...)
+# TODO: Maybe remove intersections
+```
+
+Türkçe çeviriler İngilizce kaynaktan uzun olduğu için bu bizde sürekli
+tetikleniyordu: iki baloncuk üst üste basılıyordu.
+
+Çözüm: büyütülmüş her kutu, **dedektörün gerçekten bulduğu kutuya doğru**
+geri yürütülüyor (upstream'in büyüttüğü yönün tersine), çakışma bitene kadar.
+`t=1` upstream'in büyüttüğü hali, `t=0` tespit edilen hali. Dedektörün kendi
+çakıştırdığı bölgeler olduğu gibi bırakılıyor — onu düzeltmek bizim işimiz
+değil, hem döngü de sınırlı.
+
+Yerel testte: 8000 px² çakışma → 0, kutu tespit edilen genişliğine dönüyor,
+çakışmayan kutulara hiç dokunulmuyor.
+
+---
+
+## Siyah baloncuklarda sönük metin
+
+`fg_bg_compare()` beyaz kenarlığı yalnızca metinle arka plan CIE76'da 30'dan
+az fark ediyorsa zorluyor. Gerçek OCR çıktısıyla ölçüldü:
+
+| metin | fg | bg | fark | upstream kenarlık |
+|---|---|---|---|---|
+| `BEARD?!` | (11,14,17) | (34,37,34) | 11.2 | beyaz ✅ |
+| `SHE WANTS` | (7,12,3) | (83,87,75) | **33.5** | koyu gri ❌ |
+
+30–45 bandındakiler eşikten kaçıyor: neredeyse siyah metin, koyu gri kenarlık,
+koyu baloncuk. Teoride okunur, pratikte sönük.
+
+Artık **metin ve arka planın ikisi de koyuysa** kenarlık beyaza alınıyor.
+Metnin kendisi siyah kalıyor — manga'da alışıldık hâli bu. Eşik
+`DARK_BUBBLE_MAX` (varsayılan 100), Spaces'ta Settings → Variables'tan
+rebuild'siz değiştirilebilir.
+
+Sadece bozuk vaka değişiyor: beyaz baloncuklar, açık zeminler ve zaten beyaz
+kenarlık alanlar aynen kalıyor.
+
+---
+
+## Bu düzeltmeler neden yama olarak duruyor
+
+Dockerfile, manga-image-translator'ı her build'de sabit bir commit'ten
+**yeniden klonluyor**. O ağaçta yapılan bir düzenleme build'i geçmez. Bu
+yüzden ikisi de `app/server.py` içinden modül niteliği değiştirerek
+kuruluyor (`_install_render_patches`), upstream dosyalarına dokunulmuyor.
+
+---
+
 ## Toplu yükleme ve sayfa sırası
 
 * **Tek görsel**, **çoklu görsel** ve **ZIP** yüklenebilir; hepsi aynı anda olabilir.

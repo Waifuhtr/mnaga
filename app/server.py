@@ -526,8 +526,143 @@ async def get_translator() -> "MangaTranslator":
             "batch_size": 1,
         }
         log.info("initialising MangaTranslator (gpu=%s, font=%s)", use_gpu, params["font_path"])
+        _install_render_patches()
         _translator = MangaTranslator(params)
         return _translator
+
+
+# --------------------------------------------------------------------------- #
+# Rendering fixes applied on top of upstream
+# --------------------------------------------------------------------------- #
+# Both of these are upstream gaps we hit on real pages. They are installed by
+# patching module attributes rather than editing the checkout, because the
+# Dockerfile clones manga-image-translator fresh at a pinned commit on every
+# build - an edited file there would not survive.
+
+# A text block whose background is this dark (mean of RGB) is treated as a
+# dark bubble. Overridable so it can be tuned without a rebuild.
+DARK_BUBBLE_MAX = int(os.environ.get("DARK_BUBBLE_MAX", "100"))
+
+_RENDER_PATCHED = False
+
+
+def _dark(color: Any, limit: int) -> bool:
+    try:
+        return sum(float(c) for c in color) / 3.0 <= limit
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
+
+
+def _install_render_patches() -> None:
+    """
+    Two fixes, installed once:
+
+    1. Overlapping text blocks. When a translation needs more room than the
+       source, upstream grows the block - and deliberately dropped the clip
+       that kept it inside the image, with no check against its neighbours.
+       Its own dispatch() carries the note "TODO: Maybe remove intersections".
+       Turkish runs longer than English, so two bubbles end up printed over
+       each other. Each grown block is walked back toward the box the detector
+       actually found until it stops colliding.
+
+    2. Black text on a dark bubble. fg_bg_compare() forces a white outline
+       only when the text and its background differ by less than 30 in CIE76.
+       Measured on real OCR output from a page: fg (7,12,3) on bg (83,87,75)
+       scores 33.5, clears the threshold, and renders near-black text with a
+       dark grey outline on a dark bubble - legible in theory, washed out in
+       practice. The outline now goes white whenever both are dark, which is
+       the usual manga treatment and keeps the text itself black.
+    """
+    global _RENDER_PATCHED
+    if _RENDER_PATCHED:
+        return
+
+    try:
+        import numpy as np  # noqa: PLC0415
+        from shapely.geometry import Polygon  # noqa: PLC0415
+
+        from manga_translator import rendering  # noqa: PLC0415
+    except Exception as exc:  # pragma: no cover - depends on upstream layout
+        log.warning("render patches not installed (%s); upstream behaviour kept", exc)
+        return
+
+    # --- 1. overlapping blocks ---------------------------------------------
+    _orig_resize = rendering.resize_regions_to_font_size
+
+    def _quad(points: Any) -> "Polygon":
+        return Polygon(np.asarray(points, dtype=float).reshape(4, 2))
+
+    def resize_regions_to_font_size(img, text_regions, *args, **kwargs):
+        dst = _orig_resize(img, text_regions, *args, **kwargs)
+        try:
+            return _resolve_overlaps(dst, text_regions, np, Polygon)
+        except Exception as exc:  # pragma: no cover
+            log.warning("overlap resolution skipped: %s", exc)
+            return dst
+
+    rendering.resize_regions_to_font_size = resize_regions_to_font_size
+
+    # --- 2. dark text on a dark bubble -------------------------------------
+    _orig_fg_bg = rendering.fg_bg_compare
+
+    def fg_bg_compare(fg, bg):
+        fg_out, bg_out = _orig_fg_bg(fg, bg)
+        if _dark(fg_out, 127) and _dark(bg_out, DARK_BUBBLE_MAX):
+            return fg_out, (255, 255, 255)
+        return fg_out, bg_out
+
+    rendering.fg_bg_compare = fg_bg_compare
+
+    _RENDER_PATCHED = True
+    log.info("render patches installed (overlap resolution, dark-bubble outline "
+             "at mean<=%s)", DARK_BUBBLE_MAX)
+
+
+def _resolve_overlaps(dst_points_list, text_regions, np, Polygon, max_passes: int = 8):
+    """
+    Walk each grown block back toward its detected box until blocks stop
+    overlapping.
+
+    t = 1 is upstream's grown quad, t = 0 the detected one; corners correspond
+    because both come from the same min_rect. Blocks the detector itself
+    overlapped stay as they are - undoing that is not ours to invent, and the
+    loop is bounded either way.
+    """
+    if len(dst_points_list) < 2:
+        return dst_points_list
+
+    grown, base = [], []
+    for points, region in zip(dst_points_list, text_regions):
+        grown.append(np.asarray(points, dtype=float).reshape(4, 2))
+        base.append(np.asarray(region.min_rect, dtype=float).reshape(4, 2))
+
+    t = [1.0] * len(grown)
+
+    def at(i: int) -> "Polygon":
+        return Polygon(base[i] + t[i] * (grown[i] - base[i]))
+
+    for _ in range(max_passes):
+        polys = [at(i) for i in range(len(grown))]
+        clashed = False
+        for i in range(len(grown)):
+            for j in range(i + 1, len(grown)):
+                if not polys[i].intersects(polys[j]):
+                    continue
+                if polys[i].intersection(polys[j]).area <= 1.0:
+                    continue
+                clashed = True
+                for k in (i, j):
+                    t[k] = max(0.0, t[k] - 0.25)
+        if not clashed:
+            break
+
+    pulled = sum(1 for v in t if v < 1.0)
+    if pulled:
+        log.info("overlap resolution pulled %d of %d text blocks back",
+                 pulled, len(grown))
+
+    return [np.array(at(i).exterior.coords[:4]).reshape(1, 4, 2).astype(np.int64)
+            for i in range(len(grown))]
 
 
 def _clear_glyph_cache() -> None:
