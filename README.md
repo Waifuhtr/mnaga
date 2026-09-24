@@ -190,6 +190,34 @@ gevşek eşik sayfayı sahte kutularla doldurmuyor.
 
 ---
 
+## Kod güncellemesi artık rebuild istemiyor
+
+Dockerfile'daki `ADD .../commits/<branch>` adımı, dal ilerlediğinde klon
+katmanının cache'ini kırmak için duruyordu. **Spaces'ın builder'ında
+çalışmıyor**: bir rebuild, üç commit eski bir klonu sunmaya devam etti.
+
+Bu yüzden `/app` artık build'de değil, **konteyner açılışında** GitHub'dan
+çekiliyor (`/opt/bootstrap.sh`, `ENTRYPOINT` bu). Build'deki klon **yedek**
+olarak duruyor: çekme başarısız olursa o çalışır, yani GitHub'a ulaşılamaması
+biraz eski kod demek, açılmayan bir Space demek değil.
+
+Sonuç: kod değişikliği için **restart** yeterli — saniyeler, kredi yok.
+Rebuild yalnızca Dockerfile veya modeller değişirse gerekiyor.
+
+| | eskiden | şimdi |
+|---|---|---|
+| kod değişikliği | rebuild, ~7 dk, tam image push | restart, saniyeler |
+| model değişikliği | rebuild | rebuild (değişmiyorlar zaten) |
+
+Bootstrap `/tmp/app-commit.json`'u da yeniden yazıyor, dolayısıyla arayüzdeki
+sürüm satırı **gerçekten çalışan** commit'i gösteriyor.
+
+Ortam değişkenleriyle: `APP_REFRESH=0` açılışta çekmeyi kapatır (image'daki
+kopya çalışır), `APP_REF` başka bir dala bakar, `APP_REFRESH_TIMEOUT`
+saniyedir (varsayılan 120).
+
+---
+
 ## Hangi sürüm çalışıyor?
 
 Arayüzün üst kısmında, durum göstergesinin hemen altında `sürüm 9443a29 · 24.09.2026`

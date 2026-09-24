@@ -285,9 +285,17 @@ RUN mkdir -p /opt/models/hy-mt2 \
     && ls -la /opt/models/hy-mt2/
 
 # ---------------------------------------------------------------------------
-# 9. Application source from GitHub. Last layer on purpose: a code change only
-#    rebuilds from here, leaving the model layers cached. The ADD of the commit
-#    ref busts the cache when the branch moves.
+# 9. Application source from GitHub.
+#
+#    Baked here as a FALLBACK only. The copy that actually runs is fetched by
+#    /opt/bootstrap.sh when the container starts, because this layer cannot be
+#    relied on to be current: the ADD of the commit ref below is meant to bust
+#    the cache when the branch moves, and on the Spaces builder it does not -
+#    a rebuild kept serving a clone three commits old.
+#
+#    Fetching at startup also makes code changes cost a RESTART instead of a
+#    rebuild: seconds and no credits, against ~7 minutes and a full image push.
+#    The models stay baked, which is the part that is big and never changes.
 # ---------------------------------------------------------------------------
 ARG APP_REPO=https://github.com/Waifuhtr/mnaga
 ARG APP_REF=claude/hg-space-repo-access-033wjr
@@ -323,5 +331,68 @@ EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=10s --start-period=240s --retries=5 \
     CMD curl -fsS "http://127.0.0.1:${APP_PORT}/health" || exit 1
 
+# ---------------------------------------------------------------------------
+# Startup bootstrap. Lives outside /app on purpose: it replaces /app, so it
+# cannot be running from inside it.
+# ---------------------------------------------------------------------------
+RUN cat > /opt/bootstrap.sh <<'BOOTSTRAP'
+#!/usr/bin/env bash
+# Refresh the application from GitHub, then hand over to its entrypoint.
+#
+# The image carries a copy of /app baked at build time, but that copy cannot be
+# trusted to be current: the Dockerfile's ADD of the commit ref is supposed to
+# bust the build cache when the branch moves, and on the Spaces builder it does
+# not - a rebuild kept serving a clone three commits old. Fetching here instead
+# means the running code is whatever the branch holds right now, and a code
+# change costs a restart rather than a rebuild.
+#
+# If the fetch fails for any reason the baked copy runs, so losing GitHub means
+# running slightly older code, never a Space that will not start.
+set -uo pipefail
+cd /
+
+log() { printf '[bootstrap] %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+APP_REPO=${APP_REPO:-https://github.com/Waifuhtr/mnaga}
+APP_REF=${APP_REF:-claude/hg-space-repo-access-033wjr}
+APP_REFRESH=${APP_REFRESH:-1}
+
+if [[ "${APP_REFRESH}" == "0" ]]; then
+    log "APP_REFRESH=0 - running the copy baked into the image"
+else
+    log "fetching ${APP_REF} from ${APP_REPO}"
+    rm -rf /tmp/app-new /app.old
+    if timeout "${APP_REFRESH_TIMEOUT:-120}" \
+            git clone --quiet --depth 1 --branch "${APP_REF}" "${APP_REPO}" /tmp/app-new; then
+        sha=$(git -C /tmp/app-new rev-parse HEAD)
+        when=$(git -C /tmp/app-new log -1 --format=%cI)
+        subject=$(git -C /tmp/app-new log -1 --format=%s)
+        rm -rf /tmp/app-new/.git
+        if mv /app /app.old && mv /tmp/app-new /app; then
+            rm -rf /app.old
+            chmod +x /app/scripts/*.sh 2>/dev/null || true
+            # /health and the version line in the UI read this file.
+            python - "$sha" "$when" "$subject" > /tmp/app-commit.json <<'PYJSON'
+import json, sys
+print(json.dumps({"sha": sys.argv[1],
+                  "commit": {"author": {"date": sys.argv[2]},
+                             "message": sys.argv[3]}}))
+PYJSON
+            log "running ${sha:0:7} - ${subject}"
+        else
+            log "could not swap /app into place - restoring the baked copy"
+            [[ -d /app.old && ! -d /app ]] && mv /app.old /app
+        fi
+    else
+        log "fetch failed - falling back to the copy baked into the image"
+        rm -rf /tmp/app-new
+    fi
+fi
+
+exec /app/scripts/entrypoint.sh
+BOOTSTRAP
+
+RUN chmod +x /opt/bootstrap.sh && bash -n /opt/bootstrap.sh
+
 WORKDIR /app
-ENTRYPOINT ["/app/scripts/entrypoint.sh"]
+ENTRYPOINT ["/opt/bootstrap.sh"]
