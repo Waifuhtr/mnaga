@@ -769,6 +769,67 @@ def _install_render_patches() -> None:
     except Exception as exc:  # pragma: no cover
         log.warning("Turkish hyphenator not installed (%s)", exc)
 
+    # --- 6. keep the space after Latin punctuation --------------------------
+    # put_text_horizontal() runs every line through compact_special_symbols(),
+    # which deletes the space after ANY punctuation mark - a rule meant for
+    # CJK. On Turkish output that renders "Hey,nereye?" and "Ah…Evet…", and
+    # "TEŞEKKÜRLER! GERÇEKTEN" becomes one word, so the hyphenator can break
+    # it right before the "!" and push the "!" to the start of the next line.
+    # Only CJK / full-width punctuation keeps upstream's behaviour now.
+    try:
+        from manga_translator.rendering import text_render  # noqa: PLC0415
+
+        def compact_special_symbols(text: str) -> str:
+            text = text.replace("...", "…").replace("..", "…")
+            return _CJK_PUNCT_SPACE_RE.sub(r"\1", text)
+
+        text_render.compact_special_symbols = compact_special_symbols
+    except Exception as exc:  # pragma: no cover
+        log.warning("punctuation spacing fix not installed (%s)", exc)
+
+    # --- 7. an apostrophe is not a bracket -----------------------------------
+    # The bracket clean-up in MangaTranslator lists "'" as a bracket pair, so
+    # any region with an odd number of them loses all of them: "YOU'RE" ->
+    # "YOURE", "I'M" -> "IM", and the translation goes wrong from there. The
+    # clean-up is inline in a long method, so instead the OCR output is fixed
+    # before it gets there: an apostrophe between letters becomes U+2019,
+    # which the bracket table does not contain.
+    try:
+        from manga_translator import manga_translator as mt  # noqa: PLC0415
+
+        _orig_ocr = mt.dispatch_ocr
+
+        async def dispatch_ocr(*a, **k):
+            textlines = await _orig_ocr(*a, **k)
+            for line in textlines or []:
+                text = getattr(line, "text", None)
+                if isinstance(text, str) and "'" in text:
+                    line.text = _APOSTROPHE_RE.sub("’", text)
+            return textlines
+
+        mt.dispatch_ocr = dispatch_ocr
+    except Exception as exc:  # pragma: no cover
+        log.warning("apostrophe fix not installed (%s)", exc)
+
+    # --- 8. ALL-CAPS lettering is translated as a sentence -----------------
+    # English comics are lettered in capitals, and Hy-MT2 translates shouted
+    # capitals noticeably worse: "I'M JUST GOING TO THE STORE." came back as
+    # "SİRFA MAĞAZAYA GİDİYORUM.", the same line in sentence case as "Sadece
+    # markete gidiyorum." Only mostly-uppercase Latin text is touched, so
+    # Japanese and ordinary mixed-case text pass through unchanged.
+    try:
+        from manga_translator.translators.common import CommonTranslator  # noqa: PLC0415
+
+        _orig_translate = CommonTranslator.translate
+
+        async def translate(self, from_lang, to_lang, queries, *a, **k):
+            return await _orig_translate(self, from_lang, to_lang,
+                                         [_sentence_case(q) for q in queries], *a, **k)
+
+        CommonTranslator.translate = translate
+    except Exception as exc:  # pragma: no cover
+        log.warning("sentence-case fix not installed (%s)", exc)
+
     _RENDER_PATCHED = True
     log.info("render patches installed (overlap resolution, dark-bubble outline "
              "at mean<=%s)", DARK_BUBBLE_MAX)
@@ -831,6 +892,36 @@ class _TurkishHyphenator:
 
 
 _turkish_hyphenator = _TurkishHyphenator()
+
+
+# --------------------------------------------------------------------------- #
+# Latin-script text fixes (render patches 6-8)
+# --------------------------------------------------------------------------- #
+# CJK symbols & punctuation (U+3000-303F) and full-width forms (U+FF00-FFEF):
+# the only marks after which upstream's space removal is actually wanted.
+_CJK_PUNCT_SPACE_RE = re.compile(r"([　-〿＀-￯])[ 　]+")
+# An apostrophe with a letter on both sides: YOU'RE, I'M, Kazukun'a.
+_APOSTROPHE_RE = re.compile(r"(?<=[^\W\d_])'(?=[^\W\d_])")
+_SENTENCE_START_RE = re.compile(r"(^|[.!?…]\s+)(\w)")
+_LONE_I_RE = re.compile(r"\bi\b")
+
+
+def _sentence_case(text: str) -> str:
+    """
+    "WAIT! WHERE DO YOU THINK YOU'RE GOING?" -> "Wait! Where do you think
+    you're going?". Only text that is mostly upper-case Latin is touched;
+    anything else (Japanese, mixed case, too short to judge) is returned as is.
+    """
+    if not isinstance(text, str):
+        return text
+    letters = [c for c in text if c.isalpha()]
+    latin = [c for c in letters if c.isascii()]
+    if len(latin) < 3 or len(latin) < 0.8 * len(letters):
+        return text
+    if sum(c.isupper() for c in latin) / len(latin) < 0.6:
+        return text
+    out = _SENTENCE_START_RE.sub(lambda m: m.group(1) + m.group(2).upper(), text.lower())
+    return _LONE_I_RE.sub("I", out)
 
 
 def _flat_fill(image, mask, np, cv2):
